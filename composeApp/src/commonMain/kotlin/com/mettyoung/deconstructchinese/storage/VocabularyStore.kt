@@ -32,28 +32,31 @@ object VocabularyStore {
         saveToSettings(sorted)
     }
 
+    private fun matches(a: VocabularyItem, b: VocabularyItem) =
+        a.word == b.word && a.languagePairId == b.languagePairId
+
     fun saveWord(item: VocabularyItem) {
         val currentList = _savedVocabulary.value
-        if (!currentList.any { it.word == item.word }) {
+        if (currentList.none { matches(it, item) }) {
             persist(currentList + item.copy(frequency = 0))
         }
     }
 
     fun removeWord(item: VocabularyItem) {
-        persist(_savedVocabulary.value.filter { it.word != item.word })
+        persist(_savedVocabulary.value.filterNot { matches(it, item) })
     }
 
     fun bumpFrequency(item: VocabularyItem) {
         val currentList = _savedVocabulary.value
-        if (!currentList.any { it.word == item.word }) return
+        if (currentList.none { matches(it, item) }) return
         persist(currentList.map {
-            if (it.word == item.word)
-                it.copy(frequency = it.frequency + 1, simplified = item.simplified ?: it.simplified)
+            if (matches(it, item))
+                it.copy(frequency = it.frequency + 1, altScript = item.altScript ?: it.altScript)
             else it
         })
     }
 
-    fun isSaved(word: String): Boolean {
-        return _savedVocabulary.value.any { it.word == word }
+    fun isSaved(word: String, languagePairId: String): Boolean {
+        return _savedVocabulary.value.any { it.word == word && it.languagePairId == languagePairId }
     }
 }

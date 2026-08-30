@@ -24,8 +24,10 @@ class GeminiService(
         // "-latest" aliases get deprecated and hot-swapped) — there's no
         // permanent name here. When this 404s, check
         // https://ai.google.dev/gemini-api/docs/models for the current GA
-        // flash model and update this constant.
-        const val DEFAULT_MODEL = "gemini-3.6-flash"
+        // flash model and update this constant. Flash-Lite over plain Flash:
+        // cheaper/faster and optimized for high-volume, latency-sensitive
+        // tasks like translation — a better fit for the free tier's rate limits.
+        const val DEFAULT_MODEL = "gemini-3.1-flash-lite"
         const val DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
     }
 }

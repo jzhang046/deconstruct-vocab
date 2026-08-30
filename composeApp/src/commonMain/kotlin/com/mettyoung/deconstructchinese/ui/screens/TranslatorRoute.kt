@@ -35,6 +35,7 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.mettyoung.deconstructchinese.IncomingText
 import com.mettyoung.deconstructchinese.network.createTranslationService
+import com.mettyoung.deconstructchinese.storage.AppSettings
 import com.mettyoung.deconstructchinese.ui.components.SettingsDialog
 import com.mettyoung.deconstructchinese.ui.theme.Background
 import com.mettyoung.deconstructchinese.ui.theme.BluePrimary
@@ -56,6 +57,10 @@ fun TranslatorRoute() {
     val toEnglish by viewModel.toEnglish.collectAsState()
     val useSimplified by viewModel.useSimplified.collectAsState()
     val recordingPhase by viewModel.recordingPhase.collectAsState()
+    val languagePair by viewModel.languagePair.collectAsState()
+    val selectedProvider by viewModel.selectedProvider.collectAsState()
+    val apiKeyOverrides by viewModel.apiKeyOverrides.collectAsState()
+    val modelOverrides by viewModel.modelOverrides.collectAsState()
 
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(Unit) {
@@ -68,11 +73,28 @@ fun TranslatorRoute() {
 
     var showSettings by remember { mutableStateOf(false) }
     var selectedTab by rememberSaveable { mutableIntStateOf(0) }
+    var needsLanguagePairChoice by remember { mutableStateOf(!AppSettings.hasSelectedLanguagePair) }
+
+    if (needsLanguagePairChoice) {
+        LanguagePairPickerScreen(onSelect = {
+            viewModel.setLanguagePair(it)
+            needsLanguagePairChoice = false
+        })
+        return
+    }
 
     if (showSettings) {
         SettingsDialog(
+            languagePair = languagePair,
+            onLanguagePairChange = { viewModel.setLanguagePair(it) },
             useSimplified = useSimplified,
             onUseSimplifiedChange = { viewModel.setUseSimplified(it) },
+            selectedProvider = selectedProvider,
+            onSelectedProviderChange = { viewModel.setSelectedProvider(it) },
+            apiKeyOverrides = apiKeyOverrides,
+            onApiKeyChange = { provider, value -> viewModel.setApiKeyOverride(provider, value) },
+            modelOverrides = modelOverrides,
+            onModelChange = { provider, value -> viewModel.setModelOverride(provider, value) },
             onDismiss = { showSettings = false }
         )
     }
@@ -93,6 +115,7 @@ fun TranslatorRoute() {
                 0 -> TranslateScreen(
                     inputText = inputText,
                     translationState = translationState,
+                    languagePair = languagePair,
                     toEnglish = toEnglish,
                     isPlaying = isPlaying,
                     recordingPhase = recordingPhase,
@@ -107,12 +130,14 @@ fun TranslatorRoute() {
                     onSpeakWord = viewModel::speakWord,
                     onSaveWord = viewModel::saveWord,
                     onRemoveWord = viewModel::removeWord,
+                    onRetryVocabulary = viewModel::retryVocabulary,
                     onOpenSettings = { showSettings = true },
                     onStartRecording = viewModel::startRecording,
                     onStopRecording = viewModel::stopRecording
                 )
                 1 -> VocabularyScreen(
                     vocabulary = savedVocab,
+                    languagePair = languagePair,
                     useSimplified = useSimplified,
                     onDismiss = { selectedTab = 0 },
                     onRemove = viewModel::removeWord,

@@ -18,6 +18,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.mettyoung.deconstructchinese.model.LanguagePair
 import com.mettyoung.deconstructchinese.model.TranslationResult
 import com.mettyoung.deconstructchinese.model.VocabularyItem
 import com.mettyoung.deconstructchinese.util.ChineseScriptConverter
@@ -25,21 +26,31 @@ import com.mettyoung.deconstructchinese.ui.theme.*
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun ChineseWithPinyin(
+private fun ForeignWithPhonetic(
+    languagePair: LanguagePair,
     vocabulary: List<VocabularyItem>,
     useSimplified: Boolean,
     fallbackText: String,
-    fallbackPinyin: String,
+    fallbackPhonetic: String,
     modifier: Modifier = Modifier
 ) {
-    // Stage 1 (streaming): no per-word segmentation yet — show the raw Chinese
-    // big with the whole-sentence pinyin above it until the breakdown arrives.
+    // The oversized-glyph treatment only fits scripts with a phonetic guide
+    // (short CJK words/characters paired with a pinyin-style caption). Other
+    // pairs' vocabulary entries can be full multi-word phrases, so they're
+    // shown as normal-sized flowing text instead of giant blocks.
+    val bigGlyphs = languagePair.hasPhoneticGuide
+    val wordFontSize = if (bigGlyphs) 36.sp else 20.sp
+    val wordLineHeight = if (bigGlyphs) 44.sp else 26.sp
+
+    // Stage 1 (streaming): no per-word segmentation yet — show the raw foreign
+    // text with the whole-sentence pronunciation guide above it (if any)
+    // until the breakdown arrives.
     if (vocabulary.isEmpty()) {
         if (fallbackText.isNotBlank()) {
             Column(modifier = modifier) {
-                if (fallbackPinyin.isNotBlank()) {
+                if (fallbackPhonetic.isNotBlank()) {
                     Text(
-                        text = fallbackPinyin,
+                        text = fallbackPhonetic,
                         fontSize = 14.sp,
                         color = PinyinColor,
                         fontWeight = FontWeight.Bold,
@@ -50,10 +61,10 @@ private fun ChineseWithPinyin(
                 }
                 Text(
                     text = fallbackText,
-                    fontSize = 36.sp,
+                    fontSize = wordFontSize,
                     fontWeight = FontWeight.Bold,
                     color = TextPrimary,
-                    lineHeight = 44.sp
+                    lineHeight = wordLineHeight
                 )
             }
         }
@@ -65,35 +76,37 @@ private fun ChineseWithPinyin(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         vocabulary.forEach { item ->
-            val simplified: String? = item.simplified?.takeIf { it != item.word }
-            
-            val displayWord = if (useSimplified) simplified ?: item.word else item.word
-            val counterpartWord = if (simplified != null) {
-                if (useSimplified) item.word else simplified
+            val altScript: String? = item.altScript?.takeIf { it != item.word }
+
+            val displayWord = if (useSimplified) altScript ?: item.word else item.word
+            val counterpartWord = if (altScript != null) {
+                if (useSimplified) item.word else altScript
             } else null
 
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.padding(vertical = 4.dp)
             ) {
-                val pinyinDisplay = if (counterpartWord != null) {
+                val phoneticDisplay = if (counterpartWord != null) {
                     "${item.phonetic} ($counterpartWord)"
                 } else {
                     item.phonetic
                 }
-                Text(
-                    text       = pinyinDisplay,
-                    fontSize   = 13.sp,
-                    color      = PinyinColor,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.2.sp
-                )
+                if (phoneticDisplay.isNotBlank()) {
+                    Text(
+                        text       = phoneticDisplay,
+                        fontSize   = 13.sp,
+                        color      = PinyinColor,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.2.sp
+                    )
+                }
                 Text(
                     text       = displayWord,
-                    fontSize   = 36.sp,
+                    fontSize   = wordFontSize,
                     fontWeight = FontWeight.Bold,
                     color      = TextPrimary,
-                    lineHeight = 44.sp
+                    lineHeight = wordLineHeight
                 )
             }
         }
@@ -103,11 +116,14 @@ private fun ChineseWithPinyin(
 @Composable
 fun TranslationResultCard(
     result: TranslationResult,
+    languagePair: LanguagePair,
     toEnglish: Boolean,
     isPlaying: Boolean,
     savedVocab: List<VocabularyItem>,
     useSimplified: Boolean = false,
     vocabLoading: Boolean = false,
+    vocabError: Boolean = false,
+    onRetryVocabulary: () -> Unit = {},
     onSpeak: () -> Unit,
     onStop: () -> Unit,
     onSpeakWord: (String) -> Unit,
@@ -115,12 +131,14 @@ fun TranslationResultCard(
     onRemoveWord: (VocabularyItem) -> Unit
 ) {
     val clipboardManager = LocalClipboardManager.current
-    val displayChineseText = if (useSimplified) {
-        ChineseScriptConverter.toSimplified(result.chineseText)
+    val displayForeignText = if (languagePair.hasScriptVariants && useSimplified) {
+        ChineseScriptConverter.toSimplified(result.foreignText)
     } else {
-        result.chineseText
+        result.foreignText
     }
-    val scriptLabel = if (useSimplified) "Simplified Chinese" else "Traditional Chinese"
+    val scriptLabel = if (languagePair.hasScriptVariants) {
+        if (useSimplified) "Simplified Chinese" else "Traditional Chinese"
+    } else languagePair.foreignName
 
     Column(
         modifier = Modifier
@@ -145,7 +163,7 @@ fun TranslationResultCard(
                     SectionLabel(scriptLabel.uppercase(), color = BluePrimary)
                     Row {
                         IconButton(
-                            onClick  = { clipboardManager.setText(AnnotatedString(displayChineseText)) },
+                            onClick  = { clipboardManager.setText(AnnotatedString(displayForeignText)) },
                             modifier = Modifier.size(36.dp)
                         ) {
                             Icon(Icons.Default.ContentCopy, contentDescription = "Copy", tint = TextSecondary.copy(alpha = 0.6f), modifier = Modifier.size(18.dp))
@@ -164,11 +182,12 @@ fun TranslationResultCard(
                     }
                 }
 
-                ChineseWithPinyin(
+                ForeignWithPhonetic(
+                    languagePair  = languagePair,
                     vocabulary    = result.vocabulary,
                     useSimplified = useSimplified,
-                    fallbackText  = displayChineseText,
-                    fallbackPinyin = result.phoneticText,
+                    fallbackText  = displayForeignText,
+                    fallbackPhonetic = result.phoneticText,
                     modifier      = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 8.dp)
@@ -258,12 +277,29 @@ fun TranslationResultCard(
                     color = TextSecondary.copy(alpha = 0.8f)
                 )
             }
+        } else if (vocabError && result.vocabulary.isEmpty()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(start = 4.dp, top = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "Couldn't load breakdown.",
+                    fontSize = 14.sp,
+                    color = TextSecondary.copy(alpha = 0.8f),
+                    modifier = Modifier.weight(1f, fill = false)
+                )
+                androidx.compose.material3.TextButton(onClick = onRetryVocabulary) {
+                    Text("Retry", fontWeight = FontWeight.SemiBold, color = BluePrimary)
+                }
+            }
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 result.vocabulary.forEach { item ->
                     val isSaved = savedVocab.any { it.word == item.word }
                     VocabularyCard(
                         item         = item,
+                        languagePair = languagePair,
                         isSaved      = isSaved,
                         useSimplified = useSimplified,
                         onSpeak      = { onSpeakWord(item.word) },

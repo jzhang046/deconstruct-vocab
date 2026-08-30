@@ -119,6 +119,7 @@ private fun PopupContent(
                 TranslatorPopupViewModel(
                     translationService = createTranslationService(),
                     apiKey = apiKey,
+                    languagePair = AppSettings.languagePair,
                     useSimplified = AppSettings.useSimplified
                 )
             }
@@ -160,11 +161,14 @@ private fun PopupContent(
                     TranslationState.Idle, TranslationState.Loading -> LoadingBody(selectedText)
                     is TranslationState.Success -> TranslationResultCard(
                         result = s.result,
+                        languagePair = AppSettings.languagePair,
                         toEnglish = true,
                         isPlaying = false,
                         savedVocab = emptyList(),
                         useSimplified = AppSettings.useSimplified,
                         vocabLoading = s.vocabLoading,
+                        vocabError = s.vocabError,
+                        onRetryVocabulary = { viewModel.translate(selectedText) },
                         onSpeak = onOpenInApp,
                         onStop = {},
                         onSpeakWord = { onOpenInApp() },
@@ -251,7 +255,7 @@ private fun ErrorBody(
     onDismiss: () -> Unit
 ) {
     val isMissingKey = message == TranslatorPopupViewModel.MISSING_API_KEY_MESSAGE
-    val isNotChinese = message == TranslatorPopupViewModel.NOT_CHINESE_MESSAGE
+    val isNotForeignLanguage = message == TranslatorPopupViewModel.notForeignLanguageMessage(AppSettings.languagePair)
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -266,7 +270,7 @@ private fun ErrorBody(
             OutlinedButton(onClick = onDismiss) {
                 Text("Close")
             }
-            if (!isNotChinese) {
+            if (!isNotForeignLanguage) {
                 Button(
                     onClick = onOpenInApp,
                     colors = ButtonDefaults.buttonColors(containerColor = BluePrimary)

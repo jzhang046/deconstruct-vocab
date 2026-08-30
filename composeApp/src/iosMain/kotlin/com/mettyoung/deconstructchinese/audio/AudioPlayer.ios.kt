@@ -13,7 +13,8 @@ actual class AudioPlayer actual constructor() {
     actual fun speak(text: String, language: String) {
         synthesizer.stopSpeakingAtBoundary(AVSpeechBoundary.AVSpeechBoundaryImmediate)
         val utterance = AVSpeechUtterance(string = text)
-        utterance.voice = AVSpeechSynthesisVoice.voiceWithLanguage("zh-CN")
+        // Falls back to the system default voice if none exists for `language`.
+        AVSpeechSynthesisVoice.voiceWithLanguage(language)?.let { utterance.voice = it }
         utterance.rate = 0.45f
         synthesizer.speakUtterance(utterance)
     }

@@ -25,6 +25,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.mettyoung.deconstructchinese.model.LanguagePair
 import com.mettyoung.deconstructchinese.model.RecordingPhase
 import com.mettyoung.deconstructchinese.model.TranslationState
 import com.mettyoung.deconstructchinese.model.VocabularyItem
@@ -39,6 +40,7 @@ fun TranslateScreen(
     modifier: Modifier = Modifier,
     inputText: String,
     translationState: TranslationState,
+    languagePair: LanguagePair,
     toEnglish: Boolean,
     isPlaying: Boolean,
     recordingPhase: RecordingPhase,
@@ -53,15 +55,17 @@ fun TranslateScreen(
     onSpeakWord: (String) -> Unit,
     onSaveWord: (VocabularyItem) -> Unit,
     onRemoveWord: (VocabularyItem) -> Unit,
+    onRetryVocabulary: () -> Unit,
     onOpenSettings: () -> Unit,
     onStartRecording: () -> Unit,
     onStopRecording: () -> Unit
 ) {
     Column(modifier = modifier.fillMaxSize().statusBarsPadding()) {
-        TranslateHeader(onOpenSettings = onOpenSettings)
+        TranslateHeader(languagePair = languagePair, onOpenSettings = onOpenSettings)
 
         Column(modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
             LanguageDirectionBar(
+                languagePair = languagePair,
                 toEnglish = toEnglish,
                 useSimplified = useSimplified,
                 onSwap = onSwapDirection,
@@ -92,11 +96,14 @@ fun TranslateScreen(
                     when (val state = translationState) {
                         is TranslationState.Success -> TranslationResultCard(
                             result = state.result,
+                            languagePair = languagePair,
                             toEnglish = toEnglish,
                             isPlaying = isPlaying,
                             savedVocab = savedVocab,
                             useSimplified = useSimplified,
                             vocabLoading = state.vocabLoading,
+                            vocabError = state.vocabError,
+                            onRetryVocabulary = onRetryVocabulary,
                             onSpeak = onSpeak,
                             onStop = onStop,
                             onSpeakWord = onSpeakWord,
@@ -116,30 +123,36 @@ fun TranslateScreen(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun TranslateHeader(onOpenSettings: () -> Unit) {
+private fun TranslateHeader(languagePair: LanguagePair, onOpenSettings: () -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 16.dp, top = 24.dp, bottom = 12.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        // FlowRow instead of Row: a long language name (e.g. "Bahasa Malaysia")
+        // wraps onto its own line here rather than being cut off with an ellipsis.
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalArrangement = Arrangement.Center,
+            modifier = Modifier.weight(1f).padding(end = 8.dp)
+        ) {
             Text(
-                "Deconstruct", 
+                "Deconstruct",
                 style = MaterialTheme.typography.headlineSmall.copy(
                     fontWeight = FontWeight.ExtraBold,
                     letterSpacing = (-0.5).sp
-                ), 
+                ),
                 color = TextPrimary
             )
             Text(
-                "Chinese", 
+                languagePair.label,
                 style = MaterialTheme.typography.headlineSmall.copy(
                     fontWeight = FontWeight.Light,
                     letterSpacing = (-0.5).sp
-                ), 
-                color = BluePrimary,
-                modifier = Modifier.padding(start = 4.dp)
+                ),
+                color = BluePrimary
             )
         }
         IconButton(

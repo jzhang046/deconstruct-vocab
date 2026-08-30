@@ -28,6 +28,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.mettyoung.deconstructchinese.model.LanguagePair
 import com.mettyoung.deconstructchinese.ui.theme.Background
 import com.mettyoung.deconstructchinese.ui.theme.BluePrimary
 import com.mettyoung.deconstructchinese.ui.theme.Divider
@@ -35,14 +36,17 @@ import com.mettyoung.deconstructchinese.ui.theme.TextSecondary
 
 @Composable
 fun LanguageDirectionBar(
+    languagePair: LanguagePair,
     toEnglish: Boolean,
     useSimplified: Boolean,
     onSwap: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val chineseLabel = if (useSimplified) "Simplified" else "Traditional"
-    val sourceLabel = if (toEnglish) chineseLabel else "English"
-    val targetLabel = if (toEnglish) "English" else chineseLabel
+    val foreignLabel = if (languagePair.hasScriptVariants) {
+        if (useSimplified) "Simplified" else "Traditional"
+    } else languagePair.foreignName
+    val sourceLabel = if (toEnglish) foreignLabel else "English"
+    val targetLabel = if (toEnglish) "English" else foreignLabel
 
     Surface(
         modifier = modifier.fillMaxWidth(),

@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**DeconstructChinese** — Kotlin Multiplatform Compose app for Chinese character translation and learning. Targets Android, iOS, Web (JS/WASM). Translates text via an OpenAI-compatible LLM provider (Qwen, with Gemini as automatic fallback), stores vocabulary locally with frequency tracking.
+**DeconstructChinese** — Kotlin Multiplatform Compose app for language-learning translation. Targets Android, iOS, Web (JS/WASM), Desktop. Translates text via an OpenAI-compatible LLM provider (Qwen, with Gemini as automatic fallback), stores vocabulary locally with frequency tracking. Supports multiple studied language pairs (Chinese, Bahasa Malaysia) behind a single `LanguagePair` abstraction — see Data Layer below.
 
 ### Technology Stack
 
@@ -97,7 +97,7 @@ Entry point: `desktopMain/.../main.kt` (`MainKt`). Bundled keys via `generateDes
 
 **TranslatorViewModel** holds UI state, owns coroutine scope (viewModelScope):
 - `translationState`: Current translation (Idle, Loading, Success, Error — sealed class)
-- `inputText`: User input with 800ms debounce before translate
+- `inputText`: User input; translation only fires on the explicit Translate button tap (`translate()`), never automatically while typing — avoids burning API calls on incomplete sentences
 - `toEnglish`: Direction toggle
 - `useSimplified`: Traditional vs simplified preference
 - `savedVocabulary`: StateFlow from VocabularyStore
@@ -115,29 +115,33 @@ ViewModel created once per app lifecycle; state flows collected in Compose via p
 
 ### Data Layer
 
+**LanguagePair** (`model/LanguagePair.kt`) — the only place a studied language is named. Enum entries (`CHINESE`, `MALAY`) carry `hasScriptVariants`/`hasPhoneticGuide`/`phoneticGuideName`/`speechLocale`/`ttsLocale`; everything below this enum (prompts, TTS/speech, vocab storage) is generic and branches only on these flags, keyed by `id`. Persisted via `AppSettings.languagePair`. `TranslatorRoute` shows `LanguagePairPickerScreen` on first launch (gated by `AppSettings.hasSelectedLanguagePair`); `SettingsDialog` lets it be changed later — `TranslatorViewModel.setLanguagePair()` resets in-flight translation state but never touches saved vocab.
+
 **VocabularyStore** (object singleton) — source of truth for saved words:
 - Loads/saves from Multiplatform Settings (SharedPreferences on Android, UserDefaults on iOS, localStorage on Web)
 - Sorts by frequency (highest first)
-- `saveWord()`: Prevents duplicates via word match
-- `bumpFrequency()`: Increments frequency when already-saved word appears in translation
-- Exposes `savedVocabulary: StateFlow<List<VocabularyItem>>`
+- `saveWord()`/`removeWord()`/`bumpFrequency()`/`isSaved()` all match on (word, `languagePairId`) — switching pairs filters the visible list, never loses data across pairs
+- Exposes `savedVocabulary: StateFlow<List<VocabularyItem>>` (unfiltered); `TranslatorViewModel.savedVocabulary` filters it to the active pair
 
 **AppSettings** — typed preferences wrapper:
-- `useSimplified`: Boolean — traditional vs simplified preference
-- `apiKey(provider: String)` / `setApiKey(provider, value)`: falls back to bundled `defaultApiKeys[provider]` when no user override is set
+- `useSimplified`: Boolean — traditional vs simplified preference (Chinese only)
+- `languagePair`: LanguagePair — active studied pair; `hasSelectedLanguagePair`: Boolean gates the first-launch picker
+- `apiKey(provider: String)` / `setApiKey(provider, value)`: falls back to bundled `defaultApiKeys[provider]` when no user override is set; `apiKeyOverride(provider)` returns just the raw override (blank if none) for displaying in a settings field
+- `selectedProvider`: TranslationProvider? — null ("Auto") uses the bundled default key + default model for every provider, Qwen first then Gemini; non-null means use only that provider, with its own saved key/model override
+- `model(provider: String)` / `setModel(provider, value)`: per-provider model override, blank falls back to `TranslationProvider.defaultModel`
 - Backed by Multiplatform Settings
 
-**IncomingText** — `Channel<String>(CONFLATED)` bus for text handed in from outside the app (Android `ACTION_PROCESS_TEXT`/`SEND` intents, iOS share extension via URL scheme). `submitSharedText(text)` is exposed for Swift. `TranslatorRoute` collects `IncomingText.texts` and forwards to `viewModel.onSharedText()`.
+**IncomingText** — `Channel<String>(CONFLATED)` bus for text handed in from outside the app (Android `ACTION_PROCESS_TEXT`/`SEND` intents, iOS share extension via URL scheme). `submitSharedText(text)` is exposed for Swift. `TranslatorRoute` collects `IncomingText.texts` and forwards to `viewModel.onSharedText()`; the Han-character direction auto-detect only applies when `languagePair.hasScriptVariants` (Latin-script pairs like Malay can't be told apart from English by inspection).
 
-**ChineseScriptConverter** (in `util/`) — character-level Simplified↔Traditional mapping (~400 pairs, OpenCC-derived). Unknown chars pass through. For Chinese→English, this is the **authoritative** normalization (`OpenAiCompatibleTranslator.parseResponse` calls it on the raw input); the LLM is no longer asked to also return a redundant normalized copy.
+**ChineseScriptConverter** (in `util/`) — character-level Simplified↔Traditional mapping (~400 pairs, OpenCC-derived). Unknown chars pass through. For Chinese→English, this is the **authoritative** normalization (`OpenAiCompatibleTranslator.parseResponse` calls it on the raw input, only when `languagePair.hasScriptVariants`); the LLM is no longer asked to also return a redundant normalized copy.
 
 ### Network
 
-**TranslationService** (`network/`) — interface with two entry points: `translate(...) -> TranslationResult` (full JSON: translation + pinyin + vocab breakdown) and `translateStream(...) -> Flow<String>` (plain translation only, streamed token-by-token). Call sites (`TranslatorRoute`, `TranslatePopupActivity`) get their instance from `createTranslationService()`, never construct an adapter directly.
+**TranslationService** (`network/`) — interface with two entry points, both taking a `languagePair: LanguagePair` arg: `translate(...) -> TranslationResult` (full JSON: translation + pronunciation guide + vocab breakdown) and `translateStream(...) -> Flow<PartialTranslation>` (plain translation only, streamed token-by-token). Call sites (`TranslatorRoute`, `TranslatePopupActivity`) get their instance from `createTranslationService()`, never construct an adapter directly.
 
-**AutoSwitchingTranslationService** (`network/`) — tries an ordered `Candidate(label, apiKey, service)` list, skipping blank keys and falling through on any thrown exception; sticks with whichever candidate last worked. `createTranslationService()` (`listOf(Qwen, Gemini)`) is the sole composition root and the only place provider identity is meaningful — `Secrets`/`AppSettings` below it just handle opaque provider-id strings.
+**AutoSwitchingTranslationService** (`network/`) — tries an ordered `Candidate(label, apiKey, service)` list, skipping blank keys and falling through on any thrown exception; sticks with whichever candidate last worked. `createTranslationService()` is the sole composition root and the only place provider identity is meaningful — `Secrets`/`AppSettings` below it just handle opaque provider-id strings. Its candidate list depends on `AppSettings.selectedProvider` (see Key Design Decision #6): a single-candidate list for that provider when set, or both providers with bundled defaults when null ("Auto").
 
-**Two-phase translation (latency optimization)**: both ViewModels run a two-stage pipeline. **Stage 1** calls `translateStream` and emits `TranslationState.Success(result, vocabLoading = true)` as tokens arrive — the translation + whole-sentence pinyin paint immediately (Doubao-app-fast). The stream prompt asks for `<translation>|||<pinyin>` (delimiter `OpenAiCompatibleTranslator.STREAM_DELIMITER`); the base parses it into `PartialTranslation(translation, pinyin)` so the translation fills first, then pinyin. **Stage 2** calls `translate` for the full per-word breakdown and replaces it with `vocabLoading = false`. If stage 2 fails but stage 1 succeeded, the streamed result is kept (`vocabLoading = false`, no error). `TranslationResultCard` renders the raw Chinese with whole-sentence pinyin above it (no per-word segmentation) while `vocabulary` is empty, and shows a "Loading breakdown…" spinner under the VOCABULARY BREAKDOWN label.
+**Two-phase translation (latency optimization)**: both ViewModels run a two-stage pipeline. **Stage 1** calls `translateStream` and emits `TranslationState.Success(result, vocabLoading = true)` as tokens arrive — the translation + whole-sentence pinyin paint immediately (Doubao-app-fast). The stream prompt asks for `<translation>|||<pinyin>` (delimiter `OpenAiCompatibleTranslator.STREAM_DELIMITER`); the base parses it into `PartialTranslation(translation, pinyin)` so the translation fills first, then pinyin. **Stage 2** calls `translate` for the full per-word breakdown and replaces it with `vocabLoading = false`. If stage 2 fails but stage 1 succeeded, the streamed result is kept with `vocabError = true` (`TranslatorViewModel.retryVocabulary()` re-attempts just that call). `TranslationResultCard` renders the raw foreign text with whole-sentence pronunciation guide above it (no per-word segmentation) while `vocabulary` is empty: a "Loading breakdown…" spinner while `vocabLoading`, or "Couldn't load breakdown." + a Retry button while `vocabError`.
 
 **OpenAiCompatibleTranslator** — abstract base implementing `TranslationService` against any OpenAI-compatible chat/completions endpoint:
 - Single shared `HttpClient` (lazy singleton) across all subclass instances — pooled connections; request/socket timeout 120s
@@ -148,11 +152,13 @@ ViewModel created once per app lifecycle; state flows collected in Compose via p
 - `userPromptPrefix` ctor flag → prepends a token (e.g. `/no_think` for Qwen3) to the user message
 - Strips markdown fences and parses with kotlinx.serialization (lenient)
 - Platform HTTP engines injected via sourceSets (OkHttp/Darwin/Browser default)
-- `translate()` results are memoized (mutex-guarded LRU, capacity 50, keyed on provider+text+direction+script+grammar-note) so repeat lookups skip the network; `translateStream()` isn't cached.
+- `translate()` results are memoized (mutex-guarded LRU, capacity 50, keyed on provider+text+languagePair+direction+script+grammar-note) so repeat lookups skip the network; `translateStream()` isn't cached.
+- Prompts are generated per `languagePair`, not hardcoded to Chinese: `foreignName`/`hasScriptVariants`/`hasPhoneticGuide`/`phoneticGuideName` drive the system/user prompt text and the JSON schema instructions (`phoneticText`/vocab `phonetic` are instructed to be `""` for pairs without a phonetic guide; vocab `altScript` is instructed to be omitted for pairs without script variants) — no per-pair branching needed in the DTOs themselves, only in the instruction text.
+- `TranslationResult.foreignText`/`VocabularyItem.altScript` are the generic names for what were `chineseText`/`simplified` — `altScript` is only populated for `hasScriptVariants` pairs (Traditional↔Simplified); `VocabularyItem.languagePairId` tags which pair a saved word belongs to.
 
 **Adapters**:
-- `QwenService` — tried first. Model `qwen-plus`, endpoint `https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions` (Alibaba DashScope, international/Singapore). Not a hybrid reasoning model, no `disableThinking` needed.
-- `GeminiService` — automatic fallback, chosen for its permanent (not trial) free rate-limited tier. Model `gemini-3.6-flash`, endpoint `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`, `reasoningEffort = "minimal"`. Google retires model IDs periodically (even "-latest" aliases) — bump `DEFAULT_MODEL` when it 404s; check https://ai.google.dev/gemini-api/docs/models.
+- `QwenService` — tried first in Auto mode. Default model `qwen-plus` (selectable in Settings: `qwen-turbo`/`qwen-plus`/`qwen-max`, see `TranslationProvider.QWEN.models`), endpoint `https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions` (Alibaba DashScope, international/Singapore). Not a hybrid reasoning model, no `disableThinking` needed.
+- `GeminiService` — automatic fallback in Auto mode, chosen for its permanent (not trial) free rate-limited tier. Default model `gemini-3.1-flash-lite` — highest free-tier RPM (30) of the selectable models (also: `gemini-3.5-flash-lite`/`gemini-3.5-flash`/`gemini-3.6-flash`/`gemini-3.7-flash`, see `TranslationProvider.GEMINI.models`), endpoint `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`, `reasoningEffort = "minimal"`. Google retires model IDs periodically (even "-latest" aliases) — check https://ai.google.dev/gemini-api/docs/models for the current lineup when one 404s and update `TranslationProvider.GEMINI.models`/`defaultModel`.
 - `DoubaoService` — present, unused. Model `seed-2-0-lite-260228`, endpoint `https://ark.ap-southeast.bytepluses.com/api/v3/chat/completions`, `disableThinking = true`.
 - `OpenRouterService` — present, unused. Model `qwen/qwen3-14b`, endpoint `https://openrouter.ai/api/v1/chat/completions`, `userPromptPrefix = "/no_think"`.
 
@@ -164,14 +170,14 @@ ViewModel created once per app lifecycle; state flows collected in Compose via p
 
 **App.kt** — thin wrapper: theme + `TranslatorRoute` with `apiKey` state from `AppSettings`.
 
-**TranslatorRoute** (`ui/screens/`) — owns `TranslatorViewModel` (created once via `createTranslationService()`), wires snackbar host, `IncomingText` collector, image picker, the `SettingsDialog` (Chinese-script toggle), and the bottom-`NavigationBar` Scaffold across all platforms (Translate / Saved tabs).
+**TranslatorRoute** (`ui/screens/`) — owns `TranslatorViewModel` (created once via `createTranslationService()`), wires snackbar host, `IncomingText` collector, image picker, `LanguagePairPickerScreen` (shown instead of the Scaffold on first launch, gated on `AppSettings.hasSelectedLanguagePair`), the `SettingsDialog` (language-pair switcher, Chinese-script toggle, AI provider/key/model config), and the bottom-`NavigationBar` Scaffold across all platforms (Translate / Saved tabs).
 
 **TranslateScreen** — Input, translation display, vocab actions:
-- Debounced input (800ms delay before API call)
-- Shows TranslationResult card with original, translation, pinyin, vocabulary breakdown
+- Translate button triggers the call explicitly — no auto-translate while typing
+- Shows TranslationResult card with original, translation, pronunciation guide, vocabulary breakdown
 - Vocab cards show save/remove buttons and frequency badges
 
-**VocabularyScreen** — Saved words list, frequency sorting
+**VocabularyScreen** — Saved words list (already filtered to the active `LanguagePair` by the ViewModel), frequency sorting
 
 **Components** (`ui/components/`): TranslationResultCard, VocabularyCard, ErrorCard, InputPanel, MicButton, LanguageDirectionBar, ImageSourceDialog, SettingsDialog, SectionLabel.
 
@@ -202,7 +208,7 @@ ViewModel created once per app lifecycle; state flows collected in Compose via p
 
 1. **ViewModel in common**: AndroidX ViewModel is multiplatform-compatible (via lifecycle-viewmodel-compose); used in all platforms for consistency.
 
-2. **Frequency tracking cross-script**: Vocabulary items matched by word OR (phonetic + meaning) to handle traditional/simplified variants with shared frequency.
+2. **Vocab identity**: `VocabularyStore` matches saved items by (word, `languagePairId`) — scopes frequency tracking to the studied pair and lets identical-looking words in different pairs coexist without collision.
 
 3. **No manual JSON**: kotlinx.serialization with `@Serializable` on all data classes; Ktor handles JSON automatically.
 
@@ -210,7 +216,11 @@ ViewModel created once per app lifecycle; state flows collected in Compose via p
 
 5. **Multiplatform Settings over platform-specific**: Unified persistence API; serialization plugin for complex types (List<VocabularyItem>).
 
-6. **No provider is structurally privileged**: Android/iOS/Desktop all get keys from one shared `registerGenerateSecretsTask()` (`build.gradle.kts`) writing a `Map<String, String>` keyed by provider id (from `local.properties`/env vars); Web gets an empty map (public JS bundle). Adding a provider means one new id in `apiKeyProviders`, one new adapter, one new `Candidate` in `createTranslationService()` — nothing else changes. `AppSettings.setApiKey(provider, value)` supports a user override, no UI yet.
+6. **No provider is structurally privileged**: Android/iOS/Desktop all get keys from one shared `registerGenerateSecretsTask()` (`build.gradle.kts`) writing a `Map<String, String>` keyed by provider id (from `local.properties`/env vars); Web gets an empty map (public JS bundle). Adding a provider means one new id in `apiKeyProviders`, one new adapter, one new entry in `TranslationProvider` (`model/TranslationProvider.kt` — id, label, `models: List<String>`, `defaultModel`, mirrors `LanguagePair`) — `createTranslationService()`'s local `buildService()` is still the only place a `TranslationProvider` resolves to a concrete service class.
+
+   `SettingsDialog`'s "AI PROVIDER" section is a single dropdown: Auto / Qwen / Gemini. Selecting a specific provider reveals "API KEY" and "MODEL" fields scoped to that provider (`AppSettings.setApiKey`/`setModel`, keyed by provider id) — no fallback to the other provider once one is explicitly chosen. Auto hides both fields and ignores any saved overrides entirely: it always uses the bundled key + `defaultModel` for every provider, trying Qwen then Gemini (Auto's exact behavior is intentionally left simple/unopinionated for now — not yet settled). Any change calls `TranslatorViewModel.setSelectedProvider()`/`setApiKeyOverride()`/`setModelOverride()`, which rebuild `translationService` (a `var`) via `createTranslationService()` so it takes effect immediately, no restart needed.
+
+7. **No studied language is structurally privileged**: same principle as #6, applied to languages instead of providers. `LanguagePair` is the only place "Chinese"/"Malay" mean anything; `OpenAiCompatibleTranslator`, `AudioPlayer`, `SpeechRecognizer`, `VocabularyStore`, and every UI component below it branch only on the enum's flags (`hasScriptVariants`, `hasPhoneticGuide`, locale strings), never on the language itself. Adding a pair means one new enum entry — nothing else changes.
 
 ## Common Workflows
 

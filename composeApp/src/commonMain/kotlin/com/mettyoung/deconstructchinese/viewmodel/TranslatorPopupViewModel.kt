@@ -3,6 +3,7 @@ package com.mettyoung.deconstructchinese.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.mettyoung.deconstructchinese.model.Language
+import com.mettyoung.deconstructchinese.model.LanguagePair
 import com.mettyoung.deconstructchinese.model.TranslationResult
 import com.mettyoung.deconstructchinese.model.TranslationState
 import com.mettyoung.deconstructchinese.network.TranslationService
@@ -16,6 +17,7 @@ import kotlinx.coroutines.launch
 class TranslatorPopupViewModel(
     private val translationService: TranslationService,
     private val apiKey: String,
+    private val languagePair: LanguagePair = AppSettings.languagePair,
     private val useSimplified: Boolean = AppSettings.useSimplified
 ) : ViewModel() {
 
@@ -29,8 +31,11 @@ class TranslatorPopupViewModel(
             _translationState.value = TranslationState.Idle
             return
         }
-        if (!containsHan(trimmed)) {
-            _translationState.value = TranslationState.Error(NOT_CHINESE_MESSAGE)
+        // Latin-script foreign languages (e.g. Malay) can't be distinguished
+        // from English by inspection, so the script gate only applies to pairs
+        // with a distinct script (Chinese).
+        if (languagePair.hasScriptVariants && !containsHan(trimmed)) {
+            _translationState.value = TranslationState.Error(notForeignLanguageMessage(languagePair))
             return
         }
         if (apiKey.isBlank()) {
@@ -39,12 +44,14 @@ class TranslatorPopupViewModel(
         }
         viewModelScope.launch {
             _translationState.value = TranslationState.Loading
-            val chineseLang =
+            val foreignLang = if (languagePair.hasScriptVariants) {
                 if (useSimplified) Language.CHINESE_SIMPLIFIED else Language.CHINESE_TRADITIONAL
+            } else languagePair.language
             try {
-                // Stage 1: stream translation + sentence pinyin for fast first paint.
+                // Stage 1: stream translation + sentence pronunciation guide for fast first paint.
                 translationService.translateStream(
                     text = trimmed,
+                    languagePair = languagePair,
                     toEnglish = true,
                     useSimplified = useSimplified
                 ).collect { partial ->
@@ -52,10 +59,10 @@ class TranslatorPopupViewModel(
                         result = TranslationResult(
                             originalText = trimmed,
                             translatedText = partial.translation,
-                            chineseText = trimmed,
+                            foreignText = trimmed,
                             phoneticText = partial.pinyin,
                             vocabulary = emptyList(),
-                            sourceLanguage = chineseLang,
+                            sourceLanguage = foreignLang,
                             targetLanguage = Language.ENGLISH
                         ),
                         vocabLoading = true
@@ -65,6 +72,7 @@ class TranslatorPopupViewModel(
                 // Stage 2: full breakdown.
                 val result = translationService.translate(
                     text = trimmed,
+                    languagePair = languagePair,
                     toEnglish = true,
                     useSimplified = useSimplified,
                     includeGrammarNote = false
@@ -74,7 +82,7 @@ class TranslatorPopupViewModel(
                 val current = _translationState.value
                 if (current is TranslationState.Success) {
                     // Keep the streamed translation; only the breakdown failed.
-                    _translationState.value = current.copy(vocabLoading = false)
+                    _translationState.value = current.copy(vocabLoading = false, vocabError = true)
                 } else {
                     _translationState.value = TranslationState.Error(
                         when {
@@ -93,8 +101,10 @@ class TranslatorPopupViewModel(
     }
 
     companion object {
-        const val NOT_CHINESE_MESSAGE = "Deconstruct Chinese only translates Chinese text."
         const val MISSING_API_KEY_MESSAGE = "Set your API key in the app to translate."
+
+        fun notForeignLanguageMessage(languagePair: LanguagePair) =
+            "Deconstruct only translates ${languagePair.foreignName} text."
 
         fun containsHan(text: String): Boolean =
             text.any { it.code in 0x4E00..0x9FFF }

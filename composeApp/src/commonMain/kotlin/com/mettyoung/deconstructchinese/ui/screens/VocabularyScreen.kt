@@ -18,6 +18,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.mettyoung.deconstructchinese.model.LanguagePair
 import com.mettyoung.deconstructchinese.model.VocabularyItem
 import com.mettyoung.deconstructchinese.ui.components.VocabularyCard
 import com.mettyoung.deconstructchinese.ui.theme.*
@@ -26,6 +27,7 @@ import com.mettyoung.deconstructchinese.ui.theme.*
 fun VocabularyScreen(
     modifier: Modifier = Modifier,
     vocabulary: List<VocabularyItem>,
+    languagePair: LanguagePair,
     useSimplified: Boolean = false,
     onDismiss: () -> Unit,
     onRemove: (VocabularyItem) -> Unit,
@@ -129,6 +131,7 @@ fun VocabularyScreen(
                     ) {
                         VocabularyCard(
                             item         = item,
+                            languagePair = languagePair,
                             isSaved      = true,
                             useSimplified = useSimplified,
                             onSpeak      = { onSpeak(item.word) },

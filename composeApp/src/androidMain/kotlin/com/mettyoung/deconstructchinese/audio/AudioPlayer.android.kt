@@ -25,11 +25,7 @@ actual class AudioPlayer actual constructor() {
 
     actual fun speak(text: String, language: String) {
         if (!isReady) return
-        val locale = when (language) {
-            "zh-CN" -> Locale.SIMPLIFIED_CHINESE
-            else -> Locale.SIMPLIFIED_CHINESE
-        }
-        tts?.setLanguage(locale)
+        tts?.setLanguage(Locale.forLanguageTag(language))
         tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "tts_${System.currentTimeMillis()}")
     }
 

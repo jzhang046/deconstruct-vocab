@@ -1,5 +1,8 @@
 package com.mettyoung.deconstructchinese.network
 
+import com.mettyoung.deconstructchinese.config.defaultApiKeys
+import com.mettyoung.deconstructchinese.model.LanguagePair
+import com.mettyoung.deconstructchinese.model.TranslationProvider
 import com.mettyoung.deconstructchinese.model.TranslationResult
 import com.mettyoung.deconstructchinese.storage.AppSettings
 import kotlinx.coroutines.flow.Flow
@@ -26,20 +29,22 @@ class AutoSwitchingTranslationService(
 
     override suspend fun translate(
         text: String,
+        languagePair: LanguagePair,
         toEnglish: Boolean,
         useSimplified: Boolean,
         includeGrammarNote: Boolean
-    ): TranslationResult = attempt { it.translate(text, toEnglish, useSimplified, includeGrammarNote) }
+    ): TranslationResult = attempt { it.translate(text, languagePair, toEnglish, useSimplified, includeGrammarNote) }
 
     override fun translateStream(
         text: String,
+        languagePair: LanguagePair,
         toEnglish: Boolean,
         useSimplified: Boolean
     ): Flow<PartialTranslation> = flow {
         var lastError: Exception? = null
         for (candidate in orderedCandidates()) {
             try {
-                candidate.service.translateStream(text, toEnglish, useSimplified).collect { emit(it) }
+                candidate.service.translateStream(text, languagePair, toEnglish, useSimplified).collect { emit(it) }
                 lastGoodLabel = candidate.label
                 return@flow
             } catch (e: Exception) {
@@ -76,16 +81,41 @@ class AutoSwitchingTranslationService(
 }
 
 /**
- * The service used everywhere in the app: Qwen (the bundled, developer-funded
- * key) tried first, then Gemini (your own free-tier key, if you've set one).
- * Either key may be blank — a blank one is simply skipped.
+ * The service used everywhere in the app.
  *
- * This is the only place "Qwen"/"Gemini" mean anything as providers —
- * AppSettings/Secrets below just hold keys by opaque provider id.
+ * `AppSettings.selectedProvider == null` ("Auto" in the settings UI): tries
+ * every provider, Qwen first, falling back to Gemini — using the bundled
+ * default key and default model for each, ignoring any per-provider
+ * key/model override the user may have entered while a specific provider was
+ * selected. (Auto's exact behavior is still being decided; for now it's
+ * simply "use the built-in defaults.")
+ *
+ * `selectedProvider` set to a specific provider: uses only that provider,
+ * with its saved API key override (falling back to the bundled key if blank)
+ * and saved model override (falling back to `provider.defaultModel`) — no
+ * fallback to the other provider, since the user explicitly chose this one.
+ *
+ * This is the only place "Qwen"/"Gemini" mean anything as concrete services —
+ * AppSettings/Secrets below just hold keys/models by opaque provider id, and
+ * [TranslationProvider] is just an id+label+models tuple for the UI.
  */
-fun createTranslationService(): TranslationService = AutoSwitchingTranslationService(
-    listOf(
-        AutoSwitchingTranslationService.Candidate("Qwen", AppSettings.apiKey("qwen"), QwenService(AppSettings.apiKey("qwen"))),
-        AutoSwitchingTranslationService.Candidate("Gemini", AppSettings.apiKey("gemini"), GeminiService(AppSettings.apiKey("gemini")))
-    )
-)
+fun createTranslationService(): TranslationService {
+    fun buildService(provider: TranslationProvider, apiKey: String, model: String): TranslationService =
+        when (provider) {
+            TranslationProvider.QWEN -> QwenService(apiKey, model)
+            TranslationProvider.GEMINI -> GeminiService(apiKey, model)
+        }
+
+    val selected = AppSettings.selectedProvider
+    val candidates = if (selected != null) {
+        val apiKey = AppSettings.apiKey(selected.id)
+        val model = AppSettings.model(selected.id).ifBlank { selected.defaultModel }
+        listOf(AutoSwitchingTranslationService.Candidate(selected.label, apiKey, buildService(selected, apiKey, model)))
+    } else {
+        TranslationProvider.entries.map { provider ->
+            val apiKey = defaultApiKeys[provider.id].orEmpty()
+            AutoSwitchingTranslationService.Candidate(provider.label, apiKey, buildService(provider, apiKey, provider.defaultModel))
+        }
+    }
+    return AutoSwitchingTranslationService(candidates)
+}

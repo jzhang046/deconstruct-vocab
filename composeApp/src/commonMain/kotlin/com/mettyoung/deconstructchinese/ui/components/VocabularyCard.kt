@@ -17,23 +17,26 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.mettyoung.deconstructchinese.model.LanguagePair
 import com.mettyoung.deconstructchinese.model.VocabularyItem
 import com.mettyoung.deconstructchinese.ui.theme.*
 
 @Composable
 fun VocabularyCard(
     item: VocabularyItem,
+    languagePair: LanguagePair,
     isSaved: Boolean = false,
     useSimplified: Boolean = false,
     onSpeak: () -> Unit,
     onSaveToggle: () -> Unit
 ) {
-    val simplified: String? = item.simplified?.takeIf { it != item.word }
-    val mainWord = if (useSimplified) simplified ?: item.word else item.word
-    val counterpartWord = if (simplified != null) {
-        if (useSimplified) item.word else simplified
+    val altScript: String? = if (languagePair.hasScriptVariants) item.altScript?.takeIf { it != item.word } else null
+    val mainWord = if (useSimplified) altScript ?: item.word else item.word
+    val counterpartWord = if (altScript != null) {
+        if (useSimplified) item.word else altScript
     } else null
 
     Card(
@@ -47,23 +50,35 @@ fun VocabularyCard(
             modifier = Modifier.padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Character box
-            Box(modifier = Modifier.size(52.dp)) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(BluePrimary.copy(alpha = 0.06f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text      = mainWord,
-                        fontSize  = 22.sp,
-                        fontWeight = FontWeight.Bold,
-                        color     = TextPrimary,
-                        textAlign = TextAlign.Center
-                    )
-                }
+            // Word box. Fixed square for single CJK characters/short words;
+            // for pairs whose vocabulary entries can be full phrases (e.g.
+            // Malay), the box grows with content instead of forcing giant
+            // text into a tiny square.
+            val compactWord = !languagePair.hasScriptVariants
+            Box(
+                modifier = (
+                    if (compactWord) {
+                        Modifier
+                            .defaultMinSize(minWidth = 52.dp, minHeight = 52.dp)
+                            .widthIn(max = 120.dp)
+                    } else {
+                        Modifier.size(52.dp)
+                    }
+                )
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(BluePrimary.copy(alpha = 0.06f))
+                    .let { if (compactWord) it.padding(horizontal = 8.dp, vertical = 6.dp) else it },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text      = mainWord,
+                    fontSize  = if (compactWord) 16.sp else 22.sp,
+                    fontWeight = FontWeight.Bold,
+                    color     = TextPrimary,
+                    textAlign = TextAlign.Center,
+                    maxLines  = if (compactWord) 2 else 1,
+                    overflow  = TextOverflow.Ellipsis
+                )
                 if (item.frequency > 0) {
                     Surface(
                         modifier = Modifier
@@ -96,13 +111,15 @@ fun VocabularyCard(
                 } else {
                     item.phonetic
                 }
-                Text(
-                    pinyinDisplay, 
-                    color = PinyinColor, 
-                    fontSize = 13.sp, 
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 0.3.sp
-                )
+                if (pinyinDisplay.isNotBlank()) {
+                    Text(
+                        pinyinDisplay,
+                        color = PinyinColor,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.3.sp
+                    )
+                }
                 Text(
                     item.meaning, 
                     color = TextSecondary, 

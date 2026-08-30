@@ -1,6 +1,7 @@
 package com.mettyoung.deconstructchinese.network
 
 import com.mettyoung.deconstructchinese.model.Language
+import com.mettyoung.deconstructchinese.model.LanguagePair
 import com.mettyoung.deconstructchinese.model.TranslationResult
 import com.mettyoung.deconstructchinese.model.VocabularyItem
 import com.mettyoung.deconstructchinese.util.ChineseScriptConverter
@@ -103,11 +104,12 @@ abstract class OpenAiCompatibleTranslator(
 
     final override suspend fun translate(
         text: String,
+        languagePair: LanguagePair,
         toEnglish: Boolean,
         useSimplified: Boolean,
         includeGrammarNote: Boolean
     ): TranslationResult {
-        val cacheKey = CacheKey(providerLabel, text, toEnglish, useSimplified, includeGrammarNote)
+        val cacheKey = CacheKey(providerLabel, text, languagePair.id, toEnglish, useSimplified, includeGrammarNote)
         getCached(cacheKey)?.let { cached ->
             println("[TranslationService] cache hit provider=$providerLabel chars=${text.length}")
             return cached
@@ -115,9 +117,9 @@ abstract class OpenAiCompatibleTranslator(
 
         val t0 = currentTimeMillis()
         println("[TranslationService] start provider=$providerLabel model=$model url=$baseUrl includeGrammarNote=$includeGrammarNote jsonMode=$useJsonMode chars=${text.length}")
-        val systemPrompt = if (toEnglish) SYSTEM_TO_EN else systemToChinese(useSimplified)
-        val baseUserPrompt = if (toEnglish) buildPromptToEnglish(text, includeGrammarNote)
-        else buildPromptToChinese(text, useSimplified, includeGrammarNote)
+        val systemPrompt = if (toEnglish) systemToEnglish(languagePair) else systemToForeign(languagePair, useSimplified)
+        val baseUserPrompt = if (toEnglish) buildPromptToEnglish(text, languagePair, includeGrammarNote)
+        else buildPromptToForeign(text, languagePair, useSimplified, includeGrammarNote)
         val userPrompt = if (userPromptPrefix.isNotEmpty()) "$userPromptPrefix\n$baseUserPrompt" else baseUserPrompt
 
         val requestBody = ChatRequest(
@@ -151,7 +153,7 @@ abstract class OpenAiCompatibleTranslator(
         val rawText = body.choices?.firstOrNull()?.message?.content
             ?: throw Exception("Empty response from $providerLabel")
 
-        val result = parseResponse(rawText, text, toEnglish, useSimplified)
+        val result = parseResponse(rawText, text, languagePair, toEnglish, useSimplified)
         putCached(cacheKey, result)
         val tDone = currentTimeMillis()
         println("[TranslationService] done provider=$providerLabel total=${tDone - t0}ms send=${tSend - t0}ms headers=${tHeaders - tSend}ms body=${tBody - tHeaders}ms parse=${tDone - tBody}ms outChars=${rawText.length}")
@@ -160,13 +162,14 @@ abstract class OpenAiCompatibleTranslator(
 
     final override fun translateStream(
         text: String,
+        languagePair: LanguagePair,
         toEnglish: Boolean,
         useSimplified: Boolean
     ): Flow<PartialTranslation> = flow {
         val t0 = currentTimeMillis()
         println("[TranslationService] stream start provider=$providerLabel model=$model chars=${text.length}")
         val systemPrompt = STREAM_SYSTEM
-        val userPrompt = buildStreamPrompt(text, toEnglish, useSimplified)
+        val userPrompt = buildStreamPrompt(text, languagePair, toEnglish, useSimplified)
 
         val requestBody = ChatRequest(
             model = model,
@@ -237,6 +240,7 @@ abstract class OpenAiCompatibleTranslator(
     private fun parseResponse(
         rawText: String,
         originalText: String,
+        languagePair: LanguagePair,
         toEnglish: Boolean,
         useSimplified: Boolean
     ): TranslationResult {
@@ -249,41 +253,48 @@ abstract class OpenAiCompatibleTranslator(
         @Serializable
         data class VocabDto(
             val word: String,
-            val simplified: String? = null,
-            val phonetic: String,
+            val altScript: String? = null,
+            val phonetic: String = "",
             val meaning: String
         )
 
         @Serializable
         data class TranslationDto(
             val translatedText: String,
-            val phoneticText: String,
+            val phoneticText: String = "",
             val grammarNote: String = "",
             val vocabulary: List<VocabDto>
         )
 
         val parsed = jsonConfig.decodeFromString<TranslationDto>(cleanJson)
-        val chineseLang = if (useSimplified) Language.CHINESE_SIMPLIFIED else Language.CHINESE_TRADITIONAL
+        val foreignLang = foreignLanguage(languagePair, useSimplified)
         // Script normalization is a deterministic character mapping — done
         // locally instead of asking the LLM to redo it in the response.
-        val chineseText = if (toEnglish) {
-            if (useSimplified) ChineseScriptConverter.toSimplified(originalText)
-            else ChineseScriptConverter.toTraditional(originalText)
+        val foreignText = if (toEnglish) {
+            if (languagePair.hasScriptVariants) {
+                if (useSimplified) ChineseScriptConverter.toSimplified(originalText)
+                else ChineseScriptConverter.toTraditional(originalText)
+            } else originalText
         } else parsed.translatedText
 
         return TranslationResult(
             originalText = originalText,
             translatedText = parsed.translatedText,
-            chineseText = chineseText,
+            foreignText = foreignText,
             phoneticText = parsed.phoneticText,
             grammarNote = parsed.grammarNote,
             vocabulary = parsed.vocabulary.map {
-                VocabularyItem(it.word, it.phonetic, it.meaning, simplified = it.simplified)
+                VocabularyItem(it.word, it.phonetic, it.meaning, altScript = it.altScript, languagePairId = languagePair.id)
             },
-            sourceLanguage = if (toEnglish) chineseLang else Language.ENGLISH,
-            targetLanguage = if (toEnglish) Language.ENGLISH else chineseLang
+            sourceLanguage = if (toEnglish) foreignLang else Language.ENGLISH,
+            targetLanguage = if (toEnglish) Language.ENGLISH else foreignLang
         )
     }
+
+    private fun foreignLanguage(languagePair: LanguagePair, useSimplified: Boolean): Language =
+        if (languagePair.hasScriptVariants) {
+            if (useSimplified) Language.CHINESE_SIMPLIFIED else Language.CHINESE_TRADITIONAL
+        } else languagePair.language
 
     companion object {
         private const val SIMPLIFIED = "Simplified Chinese (简体中文)"
@@ -296,6 +307,7 @@ abstract class OpenAiCompatibleTranslator(
         private data class CacheKey(
             val provider: String,
             val text: String,
+            val languagePairId: String,
             val toEnglish: Boolean,
             val useSimplified: Boolean,
             val includeGrammarNote: Boolean
@@ -319,7 +331,7 @@ abstract class OpenAiCompatibleTranslator(
         }
 
         // Stage 1: small output for fast first paint — translation + sentence
-        // pinyin, but NO per-word vocabulary breakdown.
+        // pronunciation guide, but NO per-word vocabulary breakdown.
         const val STREAM_DELIMITER = "|||"
 
         private const val STREAM_SYSTEM =
@@ -328,23 +340,37 @@ abstract class OpenAiCompatibleTranslator(
 
         private fun buildStreamPrompt(
             text: String,
+            languagePair: LanguagePair,
             toEnglish: Boolean,
             useSimplified: Boolean
         ): String = if (toEnglish) {
-            // pinyin is of the Chinese INPUT.
-            "Translate the following Chinese to English.\n" +
-                "Output exactly: <English translation>$STREAM_DELIMITER<pinyin with tone marks of the Chinese input>\n\n" +
-                "Chinese:\n$text"
+            if (languagePair.hasPhoneticGuide) {
+                // pronunciation guide is of the foreign-language INPUT.
+                "Translate the following ${languagePair.foreignName} to English.\n" +
+                    "Output exactly: <English translation>$STREAM_DELIMITER<${languagePair.phoneticGuideName} of the ${languagePair.foreignName} input>\n\n" +
+                    "${languagePair.foreignName}:\n$text"
+            } else {
+                "Translate the following ${languagePair.foreignName} to English.\n" +
+                    "Output exactly: <English translation>. No labels, no extra text.\n\n" +
+                    "${languagePair.foreignName}:\n$text"
+            }
         } else {
-            val variant = if (useSimplified) SIMPLIFIED else TRADITIONAL
-            // pinyin is of the Chinese OUTPUT.
-            "Translate the following English to $variant.\n" +
-                "Output exactly: <$variant translation>$STREAM_DELIMITER<pinyin with tone marks of that translation>\n\n" +
-                "English:\n$text"
+            val displayName = foreignDisplayName(languagePair, useSimplified)
+            if (languagePair.hasPhoneticGuide) {
+                // pronunciation guide is of the foreign-language OUTPUT.
+                "Translate the following English to $displayName.\n" +
+                    "Output exactly: <$displayName translation>$STREAM_DELIMITER<${languagePair.phoneticGuideName} of that translation>\n\n" +
+                    "English:\n$text"
+            } else {
+                "Translate the following English to $displayName.\n" +
+                    "Output exactly: <$displayName translation>. No labels, no extra text.\n\n" +
+                    "English:\n$text"
+            }
         }
-        private const val SYSTEM_TO_EN =
-            "You are a professional Chinese language teacher and translator. " +
-                "Translate Chinese text into English, and provide a detailed Chinese vocabulary breakdown. " +
+
+        private fun systemToEnglish(languagePair: LanguagePair): String =
+            "You are a professional ${languagePair.foreignName} language teacher and translator. " +
+                "Translate ${languagePair.foreignName} text into English, and provide a detailed ${languagePair.foreignName} vocabulary breakdown. " +
                 "Respond ONLY with valid JSON."
 
         private val jsonConfig = Json {
@@ -371,91 +397,118 @@ abstract class OpenAiCompatibleTranslator(
             }
         }
 
-        private fun systemToChinese(useSimplified: Boolean): String {
-            val v = if (useSimplified) SIMPLIFIED else TRADITIONAL
-            return "You are a professional translator and language teacher specializing in $v. " +
-                "Translate English into $v and provide a vocabulary breakdown. Respond ONLY with valid JSON."
+        private fun foreignDisplayName(languagePair: LanguagePair, useSimplified: Boolean): String =
+            if (languagePair.hasScriptVariants) (if (useSimplified) SIMPLIFIED else TRADITIONAL)
+            else languagePair.foreignName
+
+        private fun phoneticFieldRule(languagePair: LanguagePair): String =
+            if (languagePair.hasPhoneticGuide)
+                "phoneticText and every vocabulary phonetic must be ${languagePair.phoneticGuideName}."
+            else
+                "phoneticText and every vocabulary phonetic must be an empty string \"\" — ${languagePair.foreignName} does not need a pronunciation guide."
+
+        private fun phoneticValueHint(languagePair: LanguagePair, of: String): String =
+            if (languagePair.hasPhoneticGuide) "${languagePair.phoneticGuideName} for $of" else "always an empty string"
+
+        private fun vocabWordFieldsHint(languagePair: LanguagePair): String =
+            if (languagePair.hasScriptVariants)
+                "\"word\": \"the Traditional Chinese form of this word\",\n      \"altScript\": \"the Simplified Chinese form — omit this field only if traditional and simplified are identical\","
+            else
+                "\"word\": \"the ${languagePair.foreignName} form of this word\","
+
+        private fun vocabWordRule(languagePair: LanguagePair): String =
+            if (languagePair.hasScriptVariants)
+                "word is ALWAYS the Traditional Chinese form regardless of the preferred script. altScript is ALWAYS the Simplified Chinese form, omitted only when the characters are identical."
+            else
+                "word is the ${languagePair.foreignName} form of the vocabulary entry; omit altScript entirely."
+
+        private fun systemToForeign(languagePair: LanguagePair, useSimplified: Boolean): String {
+            val displayName = foreignDisplayName(languagePair, useSimplified)
+            return "You are a professional translator and language teacher specializing in $displayName. " +
+                "Translate English into $displayName and provide a vocabulary breakdown. Respond ONLY with valid JSON."
         }
 
-        private fun buildPromptToChinese(
+        private fun buildPromptToForeign(
             text: String,
+            languagePair: LanguagePair,
             useSimplified: Boolean,
             includeGrammarNote: Boolean
         ): String {
-            val variant = if (useSimplified) SIMPLIFIED else TRADITIONAL
-            val scriptRule = if (useSimplified)
-                "translatedText must use Simplified Chinese characters (简体中文), never Traditional."
-            else
-                "translatedText must use Traditional Chinese characters (繁體中文), never Simplified."
+            val displayName = foreignDisplayName(languagePair, useSimplified)
+            val scriptRule = if (languagePair.hasScriptVariants) {
+                if (useSimplified)
+                    "- translatedText must use Simplified Chinese characters (简体中文), never Traditional.\n"
+                else
+                    "- translatedText must use Traditional Chinese characters (繁體中文), never Simplified.\n"
+            } else ""
             val grammarField = if (includeGrammarNote)
-                "\"grammarNote\": \"one sentence in English describing the Chinese sentence structure and grammar used\",\n  "
+                "\"grammarNote\": \"one sentence in English describing the $displayName sentence structure and grammar used\",\n  "
             else ""
             val grammarRule = if (includeGrammarNote)
-                "- grammarNote must be in English, describing the grammar of the Chinese output.\n"
+                "- grammarNote must be in English, describing the grammar of the $displayName output.\n"
             else ""
             return """
-Translate the following English text into $variant.
+Translate the following English text into $displayName.
 
 Input: "$text"
 
 Return this exact JSON:
 {
-  "translatedText": "the full translation in $variant",
-  "phoneticText": "pinyin with tone marks for the entire translatedText",
+  "translatedText": "the full translation in $displayName",
+  "phoneticText": "${phoneticValueHint(languagePair, "the entire translatedText")}",
   $grammarField"vocabulary": [
     {
-      "word": "the Traditional Chinese form of this word",
-      "simplified": "the Simplified Chinese form — omit this field only if traditional and simplified are identical",
-      "phonetic": "pinyin with tone marks for this word",
+      ${vocabWordFieldsHint(languagePair)}
+      "phonetic": "${phoneticValueHint(languagePair, "this word")}",
       "meaning": "English meaning of this word"
     }
   ]
 }
 
 Rules:
-- $scriptRule
-- phoneticText and every vocabulary phonetic must be pinyin with tone marks.
-$grammarRule- vocabulary must segment translatedText into natural words, not individual characters. Multi-character words must appear as a single vocabulary entry. Do not split compound words.
-- vocabulary covers every word in translatedText in order — do not skip any.
-- word is ALWAYS the Traditional Chinese form regardless of the preferred script. simplified is ALWAYS the Simplified Chinese form, omitted only when the characters are identical.
+$scriptRule- ${phoneticFieldRule(languagePair)}
+$grammarRule- vocabulary must segment translatedText into natural words or short phrases a learner would look up individually. Do not split compound words, and do not skip any.
+- ${vocabWordRule(languagePair)}
 - Return ONLY the JSON, nothing else.
             """.trimIndent()
         }
 
         private fun buildPromptToEnglish(
             text: String,
+            languagePair: LanguagePair,
             includeGrammarNote: Boolean
         ): String {
             val grammarField = if (includeGrammarNote)
-                "\"grammarNote\": \"one sentence in English describing the Chinese sentence structure and grammar\",\n  "
+                "\"grammarNote\": \"one sentence in English describing the ${languagePair.foreignName} sentence structure and grammar\",\n  "
             else ""
             val grammarRule = if (includeGrammarNote)
-                "- grammarNote must be in English, describing the grammar of the Chinese input.\n"
+                "- grammarNote must be in English, describing the grammar of the ${languagePair.foreignName} input.\n"
+            else ""
+            val inputCaveat = if (languagePair.hasScriptVariants)
+                " The input may be Traditional Chinese, Simplified Chinese, or a mix."
             else ""
             return """
-Translate the following Chinese text into English. The input may be Traditional Chinese, Simplified Chinese, or a mix.
+Translate the following ${languagePair.foreignName} text into English.$inputCaveat
 
 Input: "$text"
 
 Return this exact JSON:
 {
   "translatedText": "the full translation in English",
-  "phoneticText": "pinyin with tone marks for the input Chinese text",
+  "phoneticText": "${phoneticValueHint(languagePair, "the input ${languagePair.foreignName} text")}",
   $grammarField"vocabulary": [
     {
-      "word": "the Traditional Chinese form of this word",
-      "simplified": "the Simplified Chinese form — omit this field only if traditional and simplified are identical",
-      "phonetic": "pinyin with tone marks for this word",
+      ${vocabWordFieldsHint(languagePair)}
+      "phonetic": "${phoneticValueHint(languagePair, "this word")}",
       "meaning": "English meaning of this word"
     }
   ]
 }
 
 Rules:
-- phoneticText is the pinyin of the input Chinese text, not the English translation.
-$grammarRule- vocabulary must segment the input into natural words, not individual characters. Multi-character words must appear as a single vocabulary entry. Do not split compound words.
-- vocabulary covers every word in the input in order — do not skip any.
-- word is ALWAYS the Traditional Chinese form regardless of the preferred script. simplified is ALWAYS the Simplified Chinese form, omitted only when the characters are identical.
+- phoneticText is the pronunciation of the input ${languagePair.foreignName} text, not the English translation.
+$grammarRule- vocabulary must segment the input into natural words or short phrases a learner would look up individually. Do not split compound words, and do not skip any.
+- ${vocabWordRule(languagePair)}
 - Return ONLY the JSON, nothing else.
             """.trimIndent()
         }
