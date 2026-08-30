@@ -16,11 +16,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **KMP**: Kotlin 2.3, Compose Multiplatform 1.10
 - **Network**: Ktor Client 3.0 (OkHttp on Android, Darwin on iOS)
 - **State**: ViewModel + StateFlow, Multiplatform Settings for persistence
-- **Translation**: `TranslationService` interface over OpenAI-compatible chat/completions; Qwen (`qwen-plus` on DashScope) is the wired default; Doubao (`seed-2-0-lite-260228`) and OpenRouter adapters also present but unused
+- **Translation**: `TranslationService` interface over OpenAI-compatible chat/completions; `createTranslationService()` (`network/AutoSwitchingTranslationService.kt`) is the composition root — Qwen (`qwen-plus` on DashScope) tried first, Gemini (`gemini-3.6-flash`, Google's permanent free rate-limited tier) as automatic fallback if Qwen's key is blank or a call throws. Doubao (`seed-2-0-lite-260228`) and OpenRouter adapters also present but unused. Provider identity ("qwen"/"gemini") only means anything inside `createTranslationService()`; every layer below it (Secrets, AppSettings) is provider-agnostic.
 - **Build**: Gradle 8.11 with version catalog (libs.versions.toml)
 - **Audio**: Platform-specific TTS (Android `TextToSpeech`, iOS `AVSpeechSynthesizer`; web stub)
 - **Speech Input**: Hold-to-record via `SpeechRecognizer` expect/actual (Android `android.speech`, iOS `SFSpeechRecognizer`)
-- **API Key**: `Secrets` expect/actual `defaultApiKey` — Android pulls from `BuildConfig.QWEN_API_KEY` (build reads `qwen.apiKey` from `local.properties`), iOS uses generated source via `generateIosSecrets` Gradle task, Web returns `""`. The provider key is **bundled**; there is no user-facing API-key entry. `AppSettings.apiKey` returns `defaultApiKey`.
+- **API Keys**: `Secrets` expect/actual `defaultApiKeys: Map<String, String>`, keyed by provider id ("qwen", "gemini"). All three non-web platforms (Android/iOS/Desktop) get keys the same way — a Gradle-generated `SecretsGenerated.kt` built from `local.properties` (`<provider>.apiKey`) or `<PROVIDER>_API_KEY` env vars (see `apiKeyProviders` in `composeApp/build.gradle.kts`); Web returns `emptyMap()` (a key in the JS bundle is public). Keys are **bundled**; there is no user-facing API-key entry. `AppSettings.apiKey(provider)` returns the bundled key unless a user override was set via `setApiKey(provider, value)`.
 
 ### Target Platforms
 
@@ -56,6 +56,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### iOS
 Open `/iosApp` in Xcode and run via IDE (KMP bridging through framework in `composeApp/build/` after Gradle sync).
 
+**Local machine prerequisites** (one-time, easy to miss on a fresh Mac):
+- **JDK 17**, not just Kotlin's bundled JRE — Gradle needs `java` resolvable both from an interactive shell (`JAVA_HOME`) and from Xcode's build-phase environment. `brew install openjdk@17` installs it keg-only; also run `sudo ln -sfn /opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk /Library/Java/JavaVirtualMachines/openjdk-17.jdk` so `/usr/libexec/java_home` (and thus Xcode) finds it without a shell-specific `JAVA_HOME` export. Pin the project's Gradle daemon to it via `~/.gradle/gradle.properties` → `org.gradle.java.home=...` if other JDKs are also installed.
+- **Full Xcode.app**, not just Command Line Tools — `xcode-select -p` must point at `/Applications/Xcode.app/Contents/Developer`; switch with `sudo xcode-select -s /Applications/Xcode.app/Contents/Developer` (fully reversible, doesn't remove the standalone CLT). Accept the license once: `sudo xcodebuild -license accept`.
+- **iOS Simulator runtime** downloaded at least once: `xcodebuild -downloadPlatform iOS`.
+- CLI equivalent of Xcode's Run button, useful for scripting/agents: `xcodebuild -scheme iosApp -configuration Debug -sdk iphonesimulator -destination 'platform=iOS Simulator,name=<device>' build`, then `xcrun simctl install/launch` the resulting `.app` from `~/Library/Developer/Xcode/DerivedData/.../Debug-iphonesimulator/DeconstructChinese.app`.
+
 ### Web
 ```bash
 # WASM (faster, modern browsers)
@@ -76,7 +82,7 @@ Open `/iosApp` in Xcode and run via IDE (KMP bridging through framework in `comp
 # Native installer (dmg/msi/deb for the current OS)
 ./gradlew :composeApp:packageDistributionForCurrentOS
 ```
-Entry point: `desktopMain/.../main.kt` (`MainKt`). Bundled Qwen key via `generateDesktopSecrets` (mirrors iOS).
+Entry point: `desktopMain/.../main.kt` (`MainKt`). Bundled keys via `generateDesktopSecrets` (mirrors iOS/Android — see API Keys above).
 
 ### Common
 ```bash
@@ -120,16 +126,18 @@ ViewModel created once per app lifecycle; state flows collected in Compose via p
 
 **AppSettings** — typed preferences wrapper:
 - `useSimplified`: Boolean — traditional vs simplified preference
-- `apiKey`: String — falls back to platform `defaultApiKey` when unset; user override persists
+- `apiKey(provider: String)` / `setApiKey(provider, value)`: falls back to the bundled `defaultApiKeys[provider]` when no user override is set. `provider` is a plain string ("qwen", "gemini") — `AppSettings` doesn't know or care which providers exist, only `createTranslationService()` does
 - Backed by Multiplatform Settings
 
 **IncomingText** — `Channel<String>(CONFLATED)` bus for text handed in from outside the app (Android `ACTION_PROCESS_TEXT`/`SEND` intents, iOS share extension via URL scheme). `submitSharedText(text)` is exposed for Swift. `TranslatorRoute` collects `IncomingText.texts` and forwards to `viewModel.onSharedText()`.
 
-**ChineseScriptConverter** (in `util/`) — character-level Simplified↔Traditional mapping (~400 pairs, OpenCC-derived). Unknown chars pass through. Used for client-side display normalization; the LLM provider still does the authoritative conversion in the JSON response.
+**ChineseScriptConverter** (in `util/`) — character-level Simplified↔Traditional mapping (~400 pairs, OpenCC-derived). Unknown chars pass through. For the Chinese→English direction, this is now the **authoritative** script normalization (`OpenAiCompatibleTranslator.parseResponse` calls it directly on the raw input) — the LLM used to be asked to also return a normalized `traditionalChineseText` field, which was redundant output-token spend for something already computable locally, so that field was dropped from the prompt/response entirely.
 
 ### Network
 
-**TranslationService** (`network/`) — interface with two entry points: `translate(...) -> TranslationResult` (full JSON: translation + pinyin + vocab breakdown) and `translateStream(...) -> Flow<String>` (plain translation only, streamed token-by-token). The provider is **hard-wired to `QwenService`** at the call sites (`TranslatorRoute`, `TranslatePopupActivity`); there is no settings/enum switch yet.
+**TranslationService** (`network/`) — interface with two entry points: `translate(...) -> TranslationResult` (full JSON: translation + pinyin + vocab breakdown) and `translateStream(...) -> Flow<String>` (plain translation only, streamed token-by-token). Call sites (`TranslatorRoute`, `TranslatePopupActivity`) get their instance from `createTranslationService()`, never construct an adapter directly.
+
+**AutoSwitchingTranslationService** (`network/AutoSwitchingTranslationService.kt`) — wraps an ordered list of `Candidate(label, apiKey, service)`. Candidates with a blank key are skipped; on any thrown exception (auth/rate-limit/network), falls through to the next candidate rather than surfacing the error. Remembers whichever candidate last succeeded and tries it first next time, so a dead/rate-limited provider isn't retried every call. If every candidate is unusable (all keys blank or all calls fail), the exception propagates normally into the existing ViewModel error handling — no special-cased crash. `createTranslationService()` is the single composition root: `listOf(Candidate("Qwen", ...), Candidate("Gemini", ...))` — this is the **only** place "Qwen"/"Gemini" are meaningful identifiers; `Secrets`/`AppSettings` below it only ever see an opaque provider-id string.
 
 **Two-phase translation (latency optimization)**: both ViewModels run a two-stage pipeline. **Stage 1** calls `translateStream` and emits `TranslationState.Success(result, vocabLoading = true)` as tokens arrive — the translation + whole-sentence pinyin paint immediately (Doubao-app-fast). The stream prompt asks for `<translation>|||<pinyin>` (delimiter `OpenAiCompatibleTranslator.STREAM_DELIMITER`); the base parses it into `PartialTranslation(translation, pinyin)` so the translation fills first, then pinyin. **Stage 2** calls `translate` for the full per-word breakdown and replaces it with `vocabLoading = false`. If stage 2 fails but stage 1 succeeded, the streamed result is kept (`vocabLoading = false`, no error). `TranslationResultCard` renders the raw Chinese with whole-sentence pinyin above it (no per-word segmentation) while `vocabulary` is empty, and shows a "Loading breakdown…" spinner under the VOCABULARY BREAKDOWN label.
 
@@ -138,15 +146,17 @@ ViewModel created once per app lifecycle; state flows collected in Compose via p
 - `translate`: builds the JSON request, conditionally includes a grammar-note instruction per `includeGrammarNote`
 - `translateStream`: SSE streaming (`stream = true`), parses `data:` lines into `StreamChunk` deltas, accumulates and emits; tiny stage-1 system prompt (`STREAM_SYSTEM` — translation text only, no JSON/pinyin)
 - `disableThinking` ctor flag → sends `thinking: {type: disabled}`. **Critical for latency**: Doubao's seed models are hybrid reasoning models that otherwise stream a chain-of-thought (`reasoning_content`) before the answer (~5x slower). Adapters hitting such a model set this true.
+- `reasoningEffort` ctor flag → sends `reasoning_effort: <value>`. Same idea as `disableThinking` but for providers whose OpenAI-compat layer uses this field instead (Gemini). **Gemini-specific gotcha**: `"none"` is rejected (400 INVALID_ARGUMENT) on Gemini 3.x models even though the 2.5 series accepted it — `"minimal"` is the lowest value 3.x actually accepts. Google has already changed accepted values once across model generations; don't assume this stays put.
 - `userPromptPrefix` ctor flag → prepends a token (e.g. `/no_think` for Qwen3) to the user message
 - Strips markdown fences and parses with kotlinx.serialization (lenient)
 - Platform HTTP engines injected via sourceSets (OkHttp/Darwin/Browser default)
+- `translate()` results are memoized in a companion-level, mutex-guarded LRU cache (capacity 50, keyed on provider+text+direction+script+grammar-note flag) — retyping the same sentence, swapping direction and back, or reopening a saved word skips the network call entirely. `translateStream()` is not cached (the smaller of the two calls; caching mid-stream would be far more invasive).
 
 **Adapters**:
-- `QwenService` — **default**. Model `qwen-plus`, endpoint `https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions` (Alibaba DashScope, international/Singapore). Not a hybrid reasoning model, so no `disableThinking`. Supports JSON mode + streaming for the two-phase pipeline.
+- `QwenService` — tried first by `createTranslationService()`. Model `qwen-plus`, endpoint `https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions` (Alibaba DashScope, international/Singapore). Not a hybrid reasoning model, so no `disableThinking`. Supports JSON mode + streaming for the two-phase pipeline.
+- `GeminiService` — automatic fallback if Qwen's key is blank or a call fails. Model `gemini-3.6-flash`, endpoint `https://generativelanguage.googleapis.com/v1beta/openai/chat/completions` (Google's OpenAI-compat layer). `reasoningEffort = "minimal"` (see gotcha above). Chosen because Gemini has a genuinely *permanent* free rate-limited tier (no trial-credit expiry), unlike Qwen's/OpenAI's time-boxed trials — but Google periodically retires model IDs outright (even its own "-latest" aliases), so `DEFAULT_MODEL` may need bumping; check https://ai.google.dev/gemini-api/docs/models when it 404s.
 - `DoubaoService` — present, unused. Model `seed-2-0-lite-260228`, endpoint `https://ark.ap-southeast.bytepluses.com/api/v3/chat/completions`, `disableThinking = true`.
 - `OpenRouterService` — present, unused. Model `qwen/qwen3-14b`, endpoint `https://openrouter.ai/api/v1/chat/completions`, `userPromptPrefix = "/no_think"`.
-- `QwenService` — present but currently unused. Model `qwen-plus`, endpoint `https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions`
 
 **grammarNote**: `TranslationResult.grammarNote` (`model/TranslationResult.kt`) is populated when `includeGrammarNote = true` and rendered in `TranslationResultCard` when non-blank. The popup VM disables it.
 
@@ -156,7 +166,7 @@ ViewModel created once per app lifecycle; state flows collected in Compose via p
 
 **App.kt** — thin wrapper: theme + `TranslatorRoute` with `apiKey` state from `AppSettings`.
 
-**TranslatorRoute** (`ui/screens/`) — owns `TranslatorViewModel` (created once with the bundled key), wires snackbar host, `IncomingText` collector, image picker, the `SettingsDialog` (Chinese-script toggle), and the bottom-`NavigationBar` Scaffold across all platforms (Translate / Saved tabs).
+**TranslatorRoute** (`ui/screens/`) — owns `TranslatorViewModel` (created once via `createTranslationService()`), wires snackbar host, `IncomingText` collector, image picker, the `SettingsDialog` (Chinese-script toggle), and the bottom-`NavigationBar` Scaffold across all platforms (Translate / Saved tabs).
 
 **TranslateScreen** — Input, translation display, vocab actions:
 - Debounced input (800ms delay before API call)
@@ -188,7 +198,7 @@ ViewModel created once per app lifecycle; state flows collected in Compose via p
 
 **`webMain` sourceSet** — intermediate parent of `jsMain` + `wasmJsMain` (wired via the default hierarchy template + matching `src/webMain` directory). Hosts no-op stubs for AudioPlayer, SpeechRecognizer, plus `isWebPlatform = true`.
 
-**`desktopMain` sourceSet** (`jvm("desktop")`) — Compose Desktop entry `main.kt`, OkHttp HTTP client (`ktor-client-okhttp` — the Java engine doesn't stream SSE, breaking the two-phase stage-1 flow), `kotlinx-coroutines-swing`. Actuals: `AudioPlayer` (speak/stop no-op, `playListenCue` = AWT beep), `SpeechRecognizer` (unsupported — emits `Error`), `Platform` (`isWebPlatform = false`), `Secrets` (`defaultApiKey` from `generateDesktopSecrets`). Mic button still renders on desktop but recording is a no-op.
+**`desktopMain` sourceSet** (`jvm("desktop")`) — Compose Desktop entry `main.kt`, OkHttp HTTP client (`ktor-client-okhttp` — the Java engine doesn't stream SSE, breaking the two-phase stage-1 flow), `kotlinx-coroutines-swing`. Actuals: `AudioPlayer` (speak/stop no-op, `playListenCue` = AWT beep), `SpeechRecognizer` (unsupported — emits `Error`), `Platform` (`isWebPlatform = false`), `Secrets` (`defaultApiKeys` from `generateDesktopSecrets`). Mic button still renders on desktop but recording is a no-op.
 
 ## Key Design Decisions
 
@@ -202,7 +212,9 @@ ViewModel created once per app lifecycle; state flows collected in Compose via p
 
 5. **Multiplatform Settings over platform-specific**: Unified persistence API; serialization plugin for complex types (List<VocabularyItem>).
 
-6. **API key injection diverges by platform**: Android via `BuildConfig` (build.gradle reads `qwen.apiKey` from `local.properties` or `QWEN_API_KEY` env var); iOS via the `generateIosSecrets` task and Desktop via `generateDesktopSecrets` (both write a `SecretsGenerated.kt` const into their build output); Web intentionally has empty default (would leak in JS bundle). The key is bundled; `AppSettings.apiKey` returns `defaultApiKey` (no user override UI).
+6. **API key injection is identical across Android/iOS/Desktop**: all three run a Gradle-generated `SecretsGenerated.kt` (`generateAndroidSecrets`/`generateIosSecrets`/`generateDesktopSecrets`, all built from the same `registerGenerateSecretsTask()` in `build.gradle.kts`) writing a `Map<String, String>` keyed by provider id, sourced from `local.properties` (`<provider>.apiKey`) or `<PROVIDER>_API_KEY` env vars. Android deliberately does **not** use `BuildConfig` for this — that would special-case Android back into its own per-provider mechanism. Web intentionally has an empty map (a key in the JS bundle is public). Keys are bundled; no user-facing override UI exists yet, though `AppSettings.setApiKey(provider, value)` supports one.
+
+7. **No provider is structurally privileged**: adding a third LLM provider means one new adapter class, one new id in `build.gradle.kts`'s `apiKeyProviders`, and one new `Candidate` in `createTranslationService()` — zero changes to `Secrets`, `AppSettings`, or any ViewModel/UI call site. This was a deliberate correction after Gemini was first added by literally duplicating Qwen's single-key mechanism (`defaultGeminiApiKey` alongside `defaultApiKey`, etc.) — don't reintroduce that pattern for the next provider.
 
 ## Common Workflows
 

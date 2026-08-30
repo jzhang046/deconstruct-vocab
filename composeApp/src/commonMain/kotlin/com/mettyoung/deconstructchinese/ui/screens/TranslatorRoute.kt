@@ -34,8 +34,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.mettyoung.deconstructchinese.IncomingText
-import com.mettyoung.deconstructchinese.network.QwenService
-import com.mettyoung.deconstructchinese.storage.AppSettings
+import com.mettyoung.deconstructchinese.network.createTranslationService
 import com.mettyoung.deconstructchinese.ui.components.SettingsDialog
 import com.mettyoung.deconstructchinese.ui.theme.Background
 import com.mettyoung.deconstructchinese.ui.theme.BluePrimary
@@ -47,7 +46,7 @@ import com.mettyoung.deconstructchinese.viewmodel.TranslatorViewModel
 @Composable
 fun TranslatorRoute() {
     val viewModel: TranslatorViewModel = viewModel(factory = viewModelFactory {
-        initializer { TranslatorViewModel(QwenService(AppSettings.apiKey)) }
+        initializer { TranslatorViewModel(createTranslationService()) }
     })
 
     val inputText by viewModel.inputText.collectAsState()
