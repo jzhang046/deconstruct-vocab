@@ -1,5 +1,4 @@
 package com.mettyoung.deconstructchinese.config
 
-import com.mettyoung.deconstructchinese.BuildConfig
-
-actual val defaultApiKey: String = BuildConfig.QWEN_API_KEY
+// androidDefaultApiKeys is generated at build time by the :generateAndroidSecrets Gradle task.
+actual val defaultApiKeys: Map<String, String> = androidDefaultApiKeys

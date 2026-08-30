@@ -1,13 +1,13 @@
 package com.mettyoung.deconstructchinese.storage
 
-import com.mettyoung.deconstructchinese.config.defaultApiKey
+import com.mettyoung.deconstructchinese.config.defaultApiKeys
 import com.russhwolf.settings.Settings
 import com.russhwolf.settings.set
 
 object AppSettings {
     private val settings: Settings = Settings()
     private const val KEY_USE_SIMPLIFIED = "use_simplified"
-    private const val KEY_API_KEY = "qwen_api_key"
+    private const val KEY_PREFIX_API_KEY = "api_key_"
 
     var useSimplified: Boolean
         get() = settings.getBoolean(KEY_USE_SIMPLIFIED, false)
@@ -15,9 +15,11 @@ object AppSettings {
             settings[KEY_USE_SIMPLIFIED] = value
         }
 
-    var apiKey: String
-        get() = settings.getString(KEY_API_KEY, defaultApiKey)
-        set(value) {
-            settings[KEY_API_KEY] = value
-        }
+    /** Effective key for [provider] ("qwen", "gemini", ...): a user override if set, else the bundled build-time key. */
+    fun apiKey(provider: String): String =
+        settings.getString("$KEY_PREFIX_API_KEY$provider", defaultApiKeys[provider].orEmpty())
+
+    fun setApiKey(provider: String, value: String) {
+        settings["$KEY_PREFIX_API_KEY$provider"] = value
+    }
 }

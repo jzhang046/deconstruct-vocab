@@ -3,6 +3,7 @@ package com.mettyoung.deconstructchinese.network
 import com.mettyoung.deconstructchinese.model.Language
 import com.mettyoung.deconstructchinese.model.TranslationResult
 import com.mettyoung.deconstructchinese.model.VocabularyItem
+import com.mettyoung.deconstructchinese.util.ChineseScriptConverter
 import io.ktor.client.HttpClient
 import io.ktor.client.call.body
 import io.ktor.client.plugins.HttpTimeout
@@ -23,6 +24,8 @@ import io.ktor.serialization.kotlinx.json.json
 import io.ktor.utils.io.readUTF8Line
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -34,7 +37,10 @@ private data class ChatRequest(
     val temperature: Double = 0.0,
     val response_format: ResponseFormat? = null,
     val stream: Boolean = false,
-    val thinking: Thinking? = null
+    val thinking: Thinking? = null,
+    // Gemini's OpenAI-compat layer uses this (values: none/low/medium/high)
+    // to disable its default-on reasoning; unrelated to Doubao's `thinking` field.
+    val reasoning_effort: String? = null
 )
 
 @Serializable
@@ -86,7 +92,10 @@ abstract class OpenAiCompatibleTranslator(
     // Doubao's seed models are hybrid reasoning models that stream a
     // chain-of-thought before the answer — the dominant latency cost. Adapters
     // that hit such a model set this true to request a direct (non-thinking) reply.
-    private val disableThinking: Boolean = false
+    private val disableThinking: Boolean = false,
+    // Same idea as disableThinking but for providers (e.g. Gemini) whose
+    // OpenAI-compat layer takes a `reasoning_effort` string instead.
+    private val reasoningEffort: String? = null
 ) : TranslationService {
 
     private val thinkingMode: Thinking? =
@@ -98,10 +107,16 @@ abstract class OpenAiCompatibleTranslator(
         useSimplified: Boolean,
         includeGrammarNote: Boolean
     ): TranslationResult {
+        val cacheKey = CacheKey(providerLabel, text, toEnglish, useSimplified, includeGrammarNote)
+        getCached(cacheKey)?.let { cached ->
+            println("[TranslationService] cache hit provider=$providerLabel chars=${text.length}")
+            return cached
+        }
+
         val t0 = currentTimeMillis()
         println("[TranslationService] start provider=$providerLabel model=$model url=$baseUrl includeGrammarNote=$includeGrammarNote jsonMode=$useJsonMode chars=${text.length}")
         val systemPrompt = if (toEnglish) SYSTEM_TO_EN else systemToChinese(useSimplified)
-        val baseUserPrompt = if (toEnglish) buildPromptToEnglish(text, useSimplified, includeGrammarNote)
+        val baseUserPrompt = if (toEnglish) buildPromptToEnglish(text, includeGrammarNote)
         else buildPromptToChinese(text, useSimplified, includeGrammarNote)
         val userPrompt = if (userPromptPrefix.isNotEmpty()) "$userPromptPrefix\n$baseUserPrompt" else baseUserPrompt
 
@@ -112,7 +127,8 @@ abstract class OpenAiCompatibleTranslator(
                 ChatMessage("user", userPrompt)
             ),
             response_format = if (useJsonMode) ResponseFormat("json_object") else null,
-            thinking = thinkingMode
+            thinking = thinkingMode,
+            reasoning_effort = reasoningEffort
         )
 
         logCurl(requestBody)
@@ -136,6 +152,7 @@ abstract class OpenAiCompatibleTranslator(
             ?: throw Exception("Empty response from $providerLabel")
 
         val result = parseResponse(rawText, text, toEnglish, useSimplified)
+        putCached(cacheKey, result)
         val tDone = currentTimeMillis()
         println("[TranslationService] done provider=$providerLabel total=${tDone - t0}ms send=${tSend - t0}ms headers=${tHeaders - tSend}ms body=${tBody - tHeaders}ms parse=${tDone - tBody}ms outChars=${rawText.length}")
         return result
@@ -158,7 +175,8 @@ abstract class OpenAiCompatibleTranslator(
                 ChatMessage("user", userPrompt)
             ),
             stream = true,
-            thinking = thinkingMode
+            thinking = thinkingMode,
+            reasoning_effort = reasoningEffort
         )
 
         sharedClient.preparePost(baseUrl) {
@@ -238,7 +256,6 @@ abstract class OpenAiCompatibleTranslator(
 
         @Serializable
         data class TranslationDto(
-            val traditionalChineseText: String = "",
             val translatedText: String,
             val phoneticText: String,
             val grammarNote: String = "",
@@ -246,8 +263,13 @@ abstract class OpenAiCompatibleTranslator(
         )
 
         val parsed = jsonConfig.decodeFromString<TranslationDto>(cleanJson)
-        val chineseText = if (toEnglish) parsed.traditionalChineseText else parsed.translatedText
         val chineseLang = if (useSimplified) Language.CHINESE_SIMPLIFIED else Language.CHINESE_TRADITIONAL
+        // Script normalization is a deterministic character mapping — done
+        // locally instead of asking the LLM to redo it in the response.
+        val chineseText = if (toEnglish) {
+            if (useSimplified) ChineseScriptConverter.toSimplified(originalText)
+            else ChineseScriptConverter.toTraditional(originalText)
+        } else parsed.translatedText
 
         return TranslationResult(
             originalText = originalText,
@@ -266,6 +288,35 @@ abstract class OpenAiCompatibleTranslator(
     companion object {
         private const val SIMPLIFIED = "Simplified Chinese (简体中文)"
         private const val TRADITIONAL = "Traditional Chinese (繁體中文)"
+
+        // Full-breakdown results are memoized so re-translating the same text
+        // (retyping it, swapping direction and back, re-opening a saved word)
+        // skips the network call entirely. Capped and evicted oldest-first so
+        // it can't grow unbounded across a long session.
+        private data class CacheKey(
+            val provider: String,
+            val text: String,
+            val toEnglish: Boolean,
+            val useSimplified: Boolean,
+            val includeGrammarNote: Boolean
+        )
+
+        private const val CACHE_CAPACITY = 50
+        private val cacheMutex = Mutex()
+        private val translationCache = LinkedHashMap<CacheKey, TranslationResult>()
+
+        private suspend fun getCached(key: CacheKey): TranslationResult? =
+            cacheMutex.withLock { translationCache[key] }
+
+        private suspend fun putCached(key: CacheKey, value: TranslationResult) {
+            cacheMutex.withLock {
+                translationCache[key] = value
+                val oldest = translationCache.keys.firstOrNull()
+                if (translationCache.size > CACHE_CAPACITY && oldest != null) {
+                    translationCache.remove(oldest)
+                }
+            }
+        }
 
         // Stage 1: small output for fast first paint — translation + sentence
         // pinyin, but NO per-word vocabulary breakdown.
@@ -373,10 +424,8 @@ $grammarRule- vocabulary must segment translatedText into natural words, not ind
 
         private fun buildPromptToEnglish(
             text: String,
-            useSimplified: Boolean,
             includeGrammarNote: Boolean
         ): String {
-            val variant = if (useSimplified) SIMPLIFIED else TRADITIONAL
             val grammarField = if (includeGrammarNote)
                 "\"grammarNote\": \"one sentence in English describing the Chinese sentence structure and grammar\",\n  "
             else ""
@@ -390,9 +439,8 @@ Input: "$text"
 
 Return this exact JSON:
 {
-  "traditionalChineseText": "the input normalized to $variant",
   "translatedText": "the full translation in English",
-  "phoneticText": "pinyin with tone marks for traditionalChineseText",
+  "phoneticText": "pinyin with tone marks for the input Chinese text",
   $grammarField"vocabulary": [
     {
       "word": "the Traditional Chinese form of this word",
@@ -404,10 +452,9 @@ Return this exact JSON:
 }
 
 Rules:
-- traditionalChineseText must use $variant characters.
-- phoneticText is the pinyin of traditionalChineseText, not the English translation.
-$grammarRule- vocabulary must segment traditionalChineseText into natural words, not individual characters. Multi-character words must appear as a single vocabulary entry. Do not split compound words.
-- vocabulary covers every word in traditionalChineseText in order — do not skip any.
+- phoneticText is the pinyin of the input Chinese text, not the English translation.
+$grammarRule- vocabulary must segment the input into natural words, not individual characters. Multi-character words must appear as a single vocabulary entry. Do not split compound words.
+- vocabulary covers every word in the input in order — do not skip any.
 - word is ALWAYS the Traditional Chinese form regardless of the preferred script. simplified is ALWAYS the Simplified Chinese form, omitted only when the characters are identical.
 - Return ONLY the JSON, nothing else.
             """.trimIndent()

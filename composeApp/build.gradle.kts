@@ -3,12 +3,19 @@ import org.jetbrains.kotlin.gradle.ExperimentalWasmDsl
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import java.util.Properties
 
-// Qwen (Alibaba DashScope) API key for local dev: read from local.properties
-// (qwen.apiKey, gitignored) or the QWEN_API_KEY env var. Bundled into the app.
-val qwenApiKey: String = run {
-    val props = Properties()
-    rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use { props.load(it) }
-    props.getProperty("qwen.apiKey") ?: System.getenv("QWEN_API_KEY") ?: ""
+// API keys for translation providers, read generically from local.properties
+// ("<provider>.apiKey", gitignored) or "<PROVIDER>_API_KEY" env vars. No
+// provider is privileged here or anywhere below this file — provider identity
+// only matters at the network factory (createTranslationService()). Add a
+// provider id to this list to bundle another one; no other change needed.
+val apiKeyProviders = listOf("qwen", "gemini")
+
+val localProperties = Properties().apply {
+    rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
+}
+
+val apiKeys: Map<String, String> = apiKeyProviders.associateWith { provider ->
+    localProperties.getProperty("$provider.apiKey") ?: System.getenv("${provider.uppercase()}_API_KEY") ?: ""
 }
 
 // Release signing — read from keystore.properties (gitignored). Absent => release
@@ -33,44 +40,37 @@ val gitCommitCount: Int = run {
     }
 }
 
-// iOS has no BuildConfig; generate the key into an iosMain source instead.
-// Web is intentionally excluded — a key in the JS bundle is readable by anyone.
-val generateIosSecrets by tasks.registering {
-    val outDir = layout.buildDirectory.dir("generated/iosSecrets/kotlin")
-    val key = qwenApiKey
-    inputs.property("qwenApiKey", key)
-    outputs.dir(outDir)
-    doLast {
-        val pkgDir = outDir.get().asFile.resolve("com/mettyoung/deconstructchinese/config")
-        pkgDir.mkdirs()
-        pkgDir.resolve("SecretsGenerated.kt").writeText(
-            """
-            package com.mettyoung.deconstructchinese.config
+// None of Android/iOS/Desktop get treated differently here: all three get
+// their bundled keys the same way, via a generated Map<String, String> source
+// file. (Android *could* use BuildConfig instead, but that would special-case
+// it back into a per-platform, per-provider mess — this keeps all three
+// symmetric.) Web is intentionally excluded — a key in the JS bundle is
+// readable by anyone.
+fun registerGenerateSecretsTask(taskName: String, constName: String, outputDirName: String) =
+    tasks.register(taskName) {
+        val outDir = layout.buildDirectory.dir("generated/$outputDirName/kotlin")
+        val keys = apiKeys
+        inputs.property("apiKeys", keys)
+        outputs.dir(outDir)
+        doLast {
+            val pkgDir = outDir.get().asFile.resolve("com/mettyoung/deconstructchinese/config")
+            pkgDir.mkdirs()
+            val entries = keys.entries.joinToString(",\n    ") { (provider, key) -> "\"$provider\" to \"$key\"" }
+            pkgDir.resolve("SecretsGenerated.kt").writeText(
+                """
+                package com.mettyoung.deconstructchinese.config
 
-            internal const val iosDefaultApiKey: String = "$key"
-            """.trimIndent() + "\n"
-        )
+                internal val $constName: Map<String, String> = mapOf(
+                    $entries
+                )
+                """.trimIndent() + "\n"
+            )
+        }
     }
-}
 
-// Desktop (JVM) also has no BuildConfig; generate the key into a desktopMain source.
-val generateDesktopSecrets by tasks.registering {
-    val outDir = layout.buildDirectory.dir("generated/desktopSecrets/kotlin")
-    val key = qwenApiKey
-    inputs.property("qwenApiKey", key)
-    outputs.dir(outDir)
-    doLast {
-        val pkgDir = outDir.get().asFile.resolve("com/mettyoung/deconstructchinese/config")
-        pkgDir.mkdirs()
-        pkgDir.resolve("SecretsGenerated.kt").writeText(
-            """
-            package com.mettyoung.deconstructchinese.config
-
-            internal const val desktopDefaultApiKey: String = "$key"
-            """.trimIndent() + "\n"
-        )
-    }
-}
+val generateAndroidSecrets = registerGenerateSecretsTask("generateAndroidSecrets", "androidDefaultApiKeys", "androidSecrets")
+val generateIosSecrets = registerGenerateSecretsTask("generateIosSecrets", "iosDefaultApiKeys", "iosSecrets")
+val generateDesktopSecrets = registerGenerateSecretsTask("generateDesktopSecrets", "desktopDefaultApiKeys", "desktopSecrets")
 
 plugins {
     alias(libs.plugins.kotlinMultiplatform)
@@ -119,10 +119,13 @@ kotlin {
     applyDefaultHierarchyTemplate()
 
     sourceSets {
-        androidMain.dependencies {
-            implementation(libs.compose.uiToolingPreview)
-            implementation(libs.androidx.activity.compose)
-            implementation(libs.ktor.client.okhttp)
+        androidMain {
+            kotlin.srcDir(generateAndroidSecrets)
+            dependencies {
+                implementation(libs.compose.uiToolingPreview)
+                implementation(libs.androidx.activity.compose)
+                implementation(libs.ktor.client.okhttp)
+            }
         }
         commonMain.dependencies {
             implementation(libs.compose.runtime)
@@ -180,10 +183,6 @@ android {
         targetSdk = libs.versions.android.targetSdk.get().toInt()
         versionCode = gitCommitCount
         versionName = "1.0.1"
-        buildConfigField("String", "QWEN_API_KEY", "\"$qwenApiKey\"")
-    }
-    buildFeatures {
-        buildConfig = true
     }
     packaging {
         resources {

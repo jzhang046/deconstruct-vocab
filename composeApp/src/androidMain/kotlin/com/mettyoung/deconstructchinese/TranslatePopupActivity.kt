@@ -54,7 +54,7 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.mettyoung.deconstructchinese.audio.AppContext
 import com.mettyoung.deconstructchinese.model.TranslationState
 import com.mettyoung.deconstructchinese.model.VocabularyItem
-import com.mettyoung.deconstructchinese.network.QwenService
+import com.mettyoung.deconstructchinese.network.createTranslationService
 import com.mettyoung.deconstructchinese.storage.AppSettings
 import com.mettyoung.deconstructchinese.ui.components.ErrorCard
 import com.mettyoung.deconstructchinese.ui.components.TranslationResultCard
@@ -112,9 +112,12 @@ private fun PopupContent(
     val viewModel: TranslatorPopupViewModel = viewModel(
         factory = viewModelFactory {
             initializer {
-                val apiKey = AppSettings.apiKey
+                // Any configured provider counts as "has a key" for the popup's
+                // early-exit check — AutoSwitchingTranslationService picks which
+                // one actually serves the request.
+                val apiKey = AppSettings.apiKey("qwen").ifBlank { AppSettings.apiKey("gemini") }
                 TranslatorPopupViewModel(
-                    translationService = QwenService(apiKey),
+                    translationService = createTranslationService(),
                     apiKey = apiKey,
                     useSimplified = AppSettings.useSimplified
                 )
