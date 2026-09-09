@@ -4,7 +4,13 @@ import type { Bindings } from "../env";
 import type { AuthedVariables } from "../lib/authMiddleware";
 import { requireAuth } from "../lib/authMiddleware";
 import { languagePairFromId } from "../lib/languagePair";
-import { autoSwitchTranslate, autoSwitchTranslateStream, geminiConfig, qwenConfig } from "../lib/providers";
+import {
+  autoSwitchTranslate,
+  autoSwitchTranslateStream,
+  geminiConfig,
+  GEMINI_FALLBACK_MODEL,
+  GEMINI_PRIMARY_MODEL,
+} from "../lib/providers";
 import { checkAndIncrementTranslateQuota, QuotaExceededError } from "../lib/rateLimit";
 import { getDb } from "../db/client";
 import type { TranslateRequestBody } from "../types";
@@ -12,8 +18,12 @@ import type { TranslateRequestBody } from "../types";
 const translate = new Hono<{ Bindings: Bindings; Variables: AuthedVariables }>();
 translate.use("*", requireAuth);
 
+// Gemini primary model first, falling back to a secondary model only on a
+// retryable failure (see autoSwitchTranslate in lib/providers.ts). Qwen is
+// temporarily removed from the chain.
 function providersFromEnv(env: Bindings) {
-  return [qwenConfig(env.QWEN_API_KEY ?? ""), geminiConfig(env.GEMINI_API_KEY ?? "")];
+  const apiKey = env.GEMINI_API_KEY ?? "";
+  return [geminiConfig(apiKey, GEMINI_PRIMARY_MODEL), geminiConfig(apiKey, GEMINI_FALLBACK_MODEL)];
 }
 
 translate.post("/", async (c) => {

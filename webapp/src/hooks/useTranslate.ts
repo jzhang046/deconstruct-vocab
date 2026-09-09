@@ -5,8 +5,8 @@ import type { TranslationResult } from "../lib/types";
 
 export type TranslationState =
   | { status: "idle" }
-  | { status: "loading" }
-  | { status: "success"; result: TranslationResult; vocabLoading: boolean; vocabError: boolean }
+  | { status: "loading"; notice?: string }
+  | { status: "success"; result: TranslationResult; vocabLoading: boolean; vocabError: boolean; notice?: string }
   | { status: "error"; message: string };
 
 function foreignLanguageCode(languagePairId: string, useSimplified: boolean) {
@@ -41,7 +41,7 @@ export function useTranslate() {
   const loadVocabulary = useCallback(async (params: TranslateParams, fallback: TranslationResult) => {
     try {
       const full = await translateFull(params);
-      setState({ status: "success", result: full, vocabLoading: false, vocabError: false });
+      setState({ status: "success", result: full, vocabLoading: false, vocabError: false, notice: full.notice });
     } catch {
       setState({ status: "success", result: fallback, vocabLoading: false, vocabError: true });
     }
@@ -61,6 +61,12 @@ export function useTranslate() {
           if (event.type === "error") {
             setState({ status: "error", message: event.message });
             return;
+          }
+          // A notice-only event (retrying with the fallback model) carries no
+          // text yet — surface it without clobbering any result we have.
+          if (event.data.notice && !event.data.translation && !event.data.pinyin) {
+            setState({ status: "loading", notice: event.data.notice });
+            continue;
           }
           lastPartial = partialResult(params, event.data.translation, event.data.pinyin);
           setState({ status: "success", result: lastPartial, vocabLoading: true, vocabError: false });

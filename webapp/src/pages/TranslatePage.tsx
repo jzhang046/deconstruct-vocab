@@ -78,10 +78,12 @@ export function TranslatePage({ languagePairId, useSimplified, toEnglish, setToE
         {state.status === "loading" ? "Translating…" : "Translate"}
       </button>
 
+      {state.status === "loading" && state.notice && <p className="hint">{state.notice}</p>}
       {state.status === "error" && <p className="hint error">{state.message}</p>}
 
       {state.status === "success" && (
         <div className="result-card card">
+          {state.notice && <p className="hint">{state.notice}</p>}
           <div className="result-foreign">
             <span>{state.result.foreignText}</span>
             {ttsSupported && (

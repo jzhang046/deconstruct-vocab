@@ -1,14 +1,19 @@
 // Port of OpenAiCompatibleTranslator.kt + QwenService.kt + GeminiService.kt +
-// AutoSwitchingTranslationService.kt. The backend now holds both provider API
-// keys (Workers secrets) — this is the only place they're used.
+// AutoSwitchingTranslationService.kt. The backend holds the provider API key
+// (a Workers secret) — this is the only place it's used.
 //
 // Deliberate simplifications vs. the Kotlin client version:
 //  - No "sticky last-good provider" retry ordering: each Worker request is
 //    independent and (unlike a long-lived app process) has no meaningful
-//    place to remember cross-request state, so we always try Qwen then Gemini
-//    in fixed order.
+//    place to remember cross-request state.
 //  - No response memoization/LRU cache: could be added later via KV if
 //    repeat-translation volume justifies it.
+//
+// Qwen is temporarily removed from the active chain (see qwenConfig, still
+// defined below but unused) in favor of a single-provider, two-model setup:
+// Gemini's primary model (fast/cheap) falls back to a secondary model only on
+// a retryable failure (429, 503, or a request timeout) — see
+// GEMINI_PRIMARY_MODEL/GEMINI_FALLBACK_MODEL and autoSwitchTranslate below.
 
 import type { LanguagePair } from "./languagePair";
 import type { LanguageCode, TranslationResult, PartialTranslation } from "../types";
@@ -41,7 +46,38 @@ export function qwenConfig(apiKey: string, model = "qwen-plus"): ProviderConfig 
   };
 }
 
-export function geminiConfig(apiKey: string, model = "gemini-3.1-flash-lite"): ProviderConfig {
+export const GEMINI_PRIMARY_MODEL = "gemini-3.5-flash-lite";
+export const GEMINI_FALLBACK_MODEL = "gemini-3.1-flash-lite";
+
+// Shown to the user when the primary model is rate-limited, returns a 503, or
+// times out and we're retrying with the fallback model. Deliberately generic —
+// never names a model.
+export const RETRY_NOTICE = "The translation service is busy — retrying, this may take a few extra seconds.";
+
+// Streaming: fetch() resolves once the first SSE bytes arrive, so this is a
+// true time-to-first-byte check — flash-lite models normally start streaming
+// in 1-3s.
+const STREAM_TIMEOUT_MS = 12_000;
+// Non-streaming (jsonMode): most chat-completion APIs don't emit response
+// headers until the full completion is generated, so fetch() resolving here
+// is close to an end-to-end generation timeout, not just connect time. That
+// call also asks for more (translation + phonetic guide + grammar note + a
+// structured vocab breakdown), so it gets more headroom — especially since
+// it's stage 2 of the UI and already renders behind a "Loading breakdown…"
+// indicator, so the extra slack costs little.
+const JSON_TIMEOUT_MS = 20_000;
+
+// Thrown by postChat for failures worth retrying with the fallback model
+// (rate limit, transient server error, or the request timing out). Any other
+// error (bad request, malformed response, etc.) is not retryable — a
+// different model won't fix it.
+class RetryableProviderError extends Error {}
+
+function isRetryable(err: unknown): boolean {
+  return err instanceof RetryableProviderError;
+}
+
+export function geminiConfig(apiKey: string, model = GEMINI_PRIMARY_MODEL): ProviderConfig {
   return {
     label: "Gemini",
     apiKey,
@@ -78,17 +114,39 @@ async function postChat(
   messages: ChatMessage[],
   opts: { stream?: boolean; jsonMode?: boolean },
 ): Promise<Response> {
-  const response = await fetch(config.baseUrl, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${config.apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(buildRequestBody(config, messages, opts)),
-  });
+  // Timeout only covers the connect + response-headers phase (i.e. it's
+  // cleared as soon as fetch() resolves), so a legitimately slow-but-flowing
+  // stream is never aborted mid-read — only a provider that never starts
+  // responding is treated as retryable.
+  const controller = new AbortController();
+  const timeoutMs = opts.stream ? STREAM_TIMEOUT_MS : JSON_TIMEOUT_MS;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let response: Response;
+  try {
+    response = await fetch(config.baseUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(buildRequestBody(config, messages, opts)),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new RetryableProviderError(`${config.label} (${config.model}) request timed out`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
   if (!response.ok) {
     const errorBody = await response.text();
-    throw new Error(`${config.label} API error: ${response.status} - ${errorBody}`);
+    const message = `${config.label} (${config.model}) API error: ${response.status} - ${errorBody}`;
+    if (response.status === 429 || response.status === 503) {
+      throw new RetryableProviderError(message);
+    }
+    throw new Error(message);
   }
   return response;
 }
@@ -236,7 +294,12 @@ export async function* translateStreamWithProvider(
   }
 }
 
-// --- Auto-switching across providers (Qwen -> Gemini), skipping blank keys ---
+// --- Auto-switching across model configs (primary -> fallback), skipping
+// blank keys. Only a retryable failure (429/503/timeout — see postChat)
+// advances to the next config; any other error is surfaced immediately since
+// swapping models wouldn't fix it. ---
+
+const NO_PROVIDER_ERROR = "No translation provider is configured. Add a Gemini API key.";
 
 export async function autoSwitchTranslate(
   providers: ProviderConfig[],
@@ -248,10 +311,12 @@ export async function autoSwitchTranslate(
   checkGrammar = false,
 ): Promise<TranslationResult> {
   const configured = providers.filter((p) => p.apiKey.trim().length > 0);
-  let lastError: unknown;
-  for (const config of configured) {
+  if (configured.length === 0) throw new Error(NO_PROVIDER_ERROR);
+
+  for (let i = 0; i < configured.length; i++) {
+    const config = configured[i];
     try {
-      return await translateWithProvider(
+      const result = await translateWithProvider(
         config,
         text,
         languagePair,
@@ -260,14 +325,14 @@ export async function autoSwitchTranslate(
         includeGrammarNote,
         checkGrammar,
       );
+      return i > 0 ? { ...result, notice: RETRY_NOTICE } : result;
     } catch (err) {
-      lastError = err;
-      console.warn(`[AutoSwitch] ${config.label} failed, trying next:`, err);
+      const canRetry = isRetryable(err) && i < configured.length - 1;
+      console.warn(`[AutoSwitch] ${config.label} failed${canRetry ? ", retrying with fallback" : ""}:`, err);
+      if (!canRetry) throw err instanceof Error ? err : new Error("Translation failed");
     }
   }
-  throw lastError instanceof Error
-    ? lastError
-    : new Error("No translation provider is configured. Add a Qwen or Gemini API key.");
+  throw new Error("Translation failed");
 }
 
 export async function* autoSwitchTranslateStream(
@@ -278,17 +343,25 @@ export async function* autoSwitchTranslateStream(
   useSimplified: boolean,
 ): AsyncGenerator<PartialTranslation> {
   const configured = providers.filter((p) => p.apiKey.trim().length > 0);
-  let lastError: unknown;
-  for (const config of configured) {
+  if (configured.length === 0) throw new Error(NO_PROVIDER_ERROR);
+
+  for (let i = 0; i < configured.length; i++) {
+    const config = configured[i];
+    let yieldedAny = false;
     try {
-      yield* translateStreamWithProvider(config, text, languagePair, toEnglish, useSimplified);
+      for await (const partial of translateStreamWithProvider(config, text, languagePair, toEnglish, useSimplified)) {
+        yieldedAny = true;
+        yield partial;
+      }
       return;
     } catch (err) {
-      lastError = err;
-      console.warn(`[AutoSwitch] ${config.label} stream failed, trying next:`, err);
+      // Only safe to restart with the fallback model if nothing has streamed
+      // to the client yet — once partial text is out, switching models mid-
+      // stream would visibly overwrite it.
+      const canRetry = isRetryable(err) && !yieldedAny && i < configured.length - 1;
+      console.warn(`[AutoSwitch] ${config.label} stream failed${canRetry ? ", retrying with fallback" : ""}:`, err);
+      if (!canRetry) throw err instanceof Error ? err : new Error("Translation failed");
+      yield { translation: "", pinyin: "", notice: RETRY_NOTICE };
     }
   }
-  throw lastError instanceof Error
-    ? lastError
-    : new Error("No translation provider is configured. Add a Qwen or Gemini API key.");
 }

@@ -34,11 +34,16 @@ export interface TranslationResult {
   correction: string;
   sourceLanguage: LanguageCode;
   targetLanguage: LanguageCode;
+  // Set only when the primary model failed with a retryable error (rate
+  // limit, 503, or timeout) and this result came from the fallback model.
+  // Never names a model — see RETRY_NOTICE in lib/providers.ts.
+  notice?: string;
 }
 
 export interface PartialTranslation {
   translation: string;
   pinyin: string;
+  notice?: string;
 }
 
 export interface TranslateRequestBody {

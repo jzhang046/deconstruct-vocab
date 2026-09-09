@@ -32,11 +32,15 @@ export interface TranslationResult {
   correction: string;
   sourceLanguage: LanguageCode;
   targetLanguage: LanguageCode;
+  // Set only when the backend had to retry with a fallback model — a
+  // generic status message, never names a model.
+  notice?: string;
 }
 
 export interface PartialTranslation {
   translation: string;
   pinyin: string;
+  notice?: string;
 }
 
 export interface User {
