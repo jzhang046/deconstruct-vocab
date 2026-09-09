@@ -1,0 +1,17 @@
+{
+  "name": "Deconstruct",
+  "short_name": "Deconstruct",
+  "description": "Learn languages by translating and saving vocabulary.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#1f6feb",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

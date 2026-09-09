@@ -9,7 +9,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**DeconstructChinese** — Kotlin Multiplatform Compose app for language-learning translation. Targets Android, iOS, Web (JS/WASM), Desktop. Translates text via an OpenAI-compatible LLM provider (Qwen, with Gemini as automatic fallback), stores vocabulary locally with frequency tracking. Supports multiple studied language pairs (Chinese, Bahasa Malaysia) behind a single `LanguagePair` abstraction — see Data Layer below.
+**DeconstructChinese** — Kotlin Multiplatform Compose app for language-learning translation. Targets Android, iOS, Web (JS/WASM, mostly stubs — see Web Backend below), Desktop. Translates text via an OpenAI-compatible LLM provider (Qwen, with Gemini as automatic fallback), stores vocabulary locally with frequency tracking. Supports multiple studied language pairs (Chinese, Bahasa Malaysia) behind a single `LanguagePair` abstraction — see Data Layer below.
+
+A separate **web app + Cloudflare backend** (`webapp/` + `backend/`, React/TS + Hono, not KMP) is the primary way most users will access this going forward — see "Web Backend (Cloudflare)" below. It's independent of the native apps: separate accounts/vocab storage, not yet unified with Android/iOS/Desktop.
 
 ### Technology Stack
 
@@ -89,6 +91,19 @@ Entry point: `desktopMain/.../main.kt` (`MainKt`). Bundled keys via `generateDes
 
 # Full test suite
 ./gradlew test
+```
+
+### Web app + backend (Cloudflare)
+```bash
+# Backend (Hono on Workers) — local dev at http://localhost:8787
+cd backend && npm install && npm run dev
+
+# Frontend (React/Vite) — local dev at http://localhost:5173, proxies /api to :8787
+cd webapp && npm install && npm run dev
+
+# Deploy (single Worker serves both) — see backend/README.md for first-time
+# Cloudflare/D1/Google-OAuth setup
+cd webapp && npm run build && cd ../backend && npx wrangler deploy
 ```
 
 ## Architecture
@@ -203,6 +218,28 @@ ViewModel created once per app lifecycle; state flows collected in Compose via p
 **`webMain` sourceSet** — intermediate parent of `jsMain` + `wasmJsMain` (wired via the default hierarchy template + matching `src/webMain` directory). Hosts no-op stubs for AudioPlayer, SpeechRecognizer, plus `isWebPlatform = true`.
 
 **`desktopMain` sourceSet** (`jvm("desktop")`) — Compose Desktop entry `main.kt`, OkHttp HTTP client (`ktor-client-okhttp` — the Java engine doesn't stream SSE, breaking the two-phase stage-1 flow), `kotlinx-coroutines-swing`. Actuals: `AudioPlayer` (speak/stop no-op, `playListenCue` = AWT beep), `SpeechRecognizer` (unsupported — emits `Error`), `Platform` (`isWebPlatform = false`), `Secrets` (`defaultApiKeys` from `generateDesktopSecrets`). Mic button still renders on desktop but recording is a no-op.
+
+### Web Backend (Cloudflare)
+
+`backend/` (Hono on Cloudflare Workers, TypeScript) + `webapp/` (React + Vite, TypeScript) — a separate, non-KMP web app. Independent from the native apps: its own accounts and D1-stored vocab, not synced with Android/iOS/Desktop's local storage. One Worker deploy serves both: `wrangler.toml`'s `[assets]` binding hosts `webapp/dist`, and `backend/src/index.ts` mounts `/api/*` routes with a trailing `app.get("*", c => c.env.ASSETS.fetch(c.req.raw))` catch-all for the SPA fallback — note that route is required even with `not_found_handling = "single-page-application"` configured, since that setting only takes effect on an explicit `ASSETS.fetch()` call, not automatically ahead of the Worker.
+
+**Why a backend at all**: the native apps each bundle their own Qwen/Gemini API key at build time (`Secrets`/`registerGenerateSecretsTask()`, see Key Design Decision #6) — web ship a key in a JS bundle is publicly readable, so the backend now holds both keys as Workers secrets and proxies every translation call, gated by per-user login.
+
+**Ported logic** (kept in sync with the Kotlin source by hand — no shared package): `backend/src/lib/languagePair.ts` (`LanguagePair` enum), `promptBuilder.ts` (the prompt/JSON-schema strings from `OpenAiCompatibleTranslator`'s companion object), `scriptConverter.ts` (the same ~400-pair OpenCC table), `providers.ts` (Qwen/Gemini adapters + Qwen-then-Gemini fallback, minus the Kotlin client's sticky-last-good-provider and LRU cache — both deliberately dropped as not meaningful across stateless per-request Workers). `webapp/src/lib/{types,languagePair}.ts` mirror the API contract for the frontend.
+
+**Auth**: Google OAuth (Authorization Code + PKCE), `backend/src/routes/auth.ts`. Session is a signed JWT (Hono's `hono/jwt`, HS256, `SESSION_SECRET` Workers secret) in an HttpOnly/SameSite=Lax cookie, 30-day expiry (`backend/src/lib/session.ts`). `requireAuth` middleware (`authMiddleware.ts`) gates `/api/translate/*` and `/api/vocab/*`. `GET /api/auth/dev-login` is a passwordless bypass reachable only when `ENVIRONMENT == "development"` (never in a real deploy — see `wrangler.toml`'s `[vars]`), for local testing without a registered Google OAuth client.
+
+**Rate limiting**: `backend/src/lib/rateLimit.ts` enforces a per-user daily translate quota (default 200/day) via a D1 `usage_counters` table, checked before every provider call — added specifically because the backend now fronts one shared paid API key for every user.
+
+**Vocab cap**: 500 words/user, enforced in `backend/src/routes/vocab.ts` against a D1 `vocabulary` table (unique on `user_id, word, language_pair_id`, mirroring `VocabularyStore`'s dedup rule). `POST /api/vocab` bumps frequency on an existing word or inserts a new one (403 past the cap).
+
+**Streaming**: `GET /api/translate/stream` is SSE (Hono's `streamSSE`). The frontend deliberately does NOT use `EventSource` — it auto-reconnects when the server closes the stream (which it always does once translation finishes), silently re-triggering the call. `webapp/src/api/client.ts`'s `streamTranslate()` reads the SSE response manually via `fetch()` + `ReadableStream` instead.
+
+**Local dev**: `backend/.dev.vars` (gitignored) sets `ENVIRONMENT=development` (flips cookies to non-`Secure`, since browsers drop `Secure` cookies over plain HTTP even on `127.0.0.1`) plus provider/OAuth keys — dummy values are fine for testing everything except real translation content. See `backend/README.md` for first-time Cloudflare/D1/Google-OAuth setup and deploy steps.
+
+**Custom domain + `run_worker_first` gotcha**: production is served at `deconstruct-vocab.xyz` via `wrangler.toml`'s `routes = [{ pattern = "deconstruct-vocab.xyz", custom_domain = true }]` (requires the domain's nameservers to be delegated to Cloudflare first). Adding an explicit `routes` entry silently disables the `workers.dev` fallback URL — keep `workers_dev = true` alongside it if you still want that URL live. Critically, `[assets].run_worker_first = ["/api/*"]` is also required: real browser top-level navigations (`Sec-Fetch-Mode: navigate` — a link click or an OAuth redirect, as opposed to `fetch()`/XHR) are matched against static assets *before* the Worker runs, so without this, `not_found_handling = "single-page-application"` serves `index.html` for `/api/auth/login/...` and `/api/auth/callback/...` instead of ever invoking the Worker — looks exactly like a login button silently doing nothing. Invisible in `wrangler dev --local` (Miniflare doesn't reproduce this precedence), only shows up on a real edge deploy.
+
+**Frontend preferences & UX** (`webapp/src/App.tsx`, `pages/TranslatePage.tsx`): last-used `languagePairId`/`useSimplified`/`toEnglish` persist to `localStorage` (per-browser, not per-account — deliberately not round-tripped through the backend since it's a low-stakes UI preference) and restore on load. Above a 900px viewport, Translate and Saved render side by side as a CSS grid instead of tab-switched (`index.css`'s `.app-content`/`.panel` rules) — both panels stay mounted at all times so switching tabs on mobile doesn't reset in-progress state. A "Check my \<language\> for mistakes" toggle (`checkGrammar` param) is only offered when translating *from* the studied language *to* English (i.e., the user typed the sentence themselves); when on, `buildPromptToEnglish` asks the model for one extra `correction` JSON field alongside the existing breakdown call — no second API call, small output-token cost.
 
 ## Key Design Decisions
 

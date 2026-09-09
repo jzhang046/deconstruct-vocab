@@ -1,0 +1,50 @@
+name = "deconstruct-backend"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+routes = [
+  { pattern = "deconstruct-vocab.xyz", custom_domain = true }
+]
+# Adding `routes` makes wrangler disable the workers.dev URL by default —
+# keep it alive too as a fallback/testing endpoint alongside the custom domain.
+workers_dev = true
+
+# Serves the built React SPA (webapp/dist) for any request that doesn't match
+# a Worker route below, so the frontend and API ship as one deployable unit.
+[assets]
+directory = "../webapp/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+# Real browser navigations (Sec-Fetch-Mode: navigate — a plain <a href> click
+# or an OAuth redirect target, as opposed to fetch()/XHR) are matched against
+# static assets BEFORE the Worker runs, and Cloudflare's `not_found_handling`
+# SPA fallback serves index.html for any non-matching path — including our
+# own /api/* routes — without ever invoking the Worker. /api/auth/login and
+# /api/auth/callback are always hit via top-level navigation (OAuth requires
+# it), so without this they 200 with the SPA shell instead of redirecting,
+# which looks like the login button doing nothing / looping. This wasn't
+# visible in `wrangler dev --local` — Miniflare doesn't reproduce this
+# asset-vs-Worker precedence quirk, only the real edge deploy does.
+run_worker_first = ["/api/*"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "deconstruct-db"
+database_id = "9f0771fd-5fac-4e09-b21a-1c6fa03054af"
+
+# Secrets (set via `wrangler secret put <NAME>`, never committed):
+#   QWEN_API_KEY
+#   GEMINI_API_KEY
+#   SESSION_SECRET       - HMAC signing key for session JWTs
+#   GOOGLE_CLIENT_ID
+#   GOOGLE_CLIENT_SECRET
+
+[vars]
+# Non-secret config. Real provider keys/OAuth secrets go in `wrangler secret put`, not here.
+# "production" here (not "development") is deliberate: this is what a bare
+# `wrangler deploy` ships with. ENVIRONMENT gates the `Secure` cookie flag and
+# the /api/auth/dev-login bypass — both must be off by default in a real
+# deploy. Local dev overrides this back to "development" via .dev.vars
+# (gitignored, loaded automatically by `wrangler dev`, never by `deploy`).
+ENVIRONMENT = "production"

@@ -22,3 +22,9 @@ node_modules/
 *.jks
 *.keystore
 keystore.properties
+
+# backend/ (Cloudflare Worker) + webapp/ (React frontend)
+.wrangler/
+backend/.dev.vars
+webapp/dist/
+*.tsbuildinfo

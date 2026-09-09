@@ -1,0 +1,31 @@
+{
+  "name": "deconstruct-backend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate:local": "wrangler d1 migrations apply deconstruct-db --local",
+    "db:migrate:remote": "wrangler d1 migrations apply deconstruct-db --remote"
+  },
+  "dependencies": {
+    "hono": "^4.13.7",
+    "drizzle-orm": "^0.45.2"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260908.1",
+    "drizzle-kit": "^0.31.10",
+    "typescript": "^5.7.2",
+    "wrangler": "^4.129.1"
+  },
+  "allowScripts": {
+    "esbuild@0.18.20": true,
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.2": true,
+    "esbuild@0.28.1": true,
+    "workerd@1.20260907.1": true,
+    "fsevents@2.3.3": true
+  }
+}
