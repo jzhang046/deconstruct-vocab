@@ -82,6 +82,8 @@ This replaced an older two-call pipeline (a cheap preview, then a full breakdown
 
 **Native browser APIs**: `audio/speech.ts` uses `SpeechSynthesis` for TTS and `audio/useSpeechRecognition.ts` uses `SpeechRecognition`/`webkitSpeechRecognition` for voice input — real support the old KMP web target never had (it only had empty stubs).
 
+**Visual design system** (`index.css`): ink-on-paper palette (`--paper`/`--ink`/`--accent`/`--mark`, light+dark via `prefers-color-scheme`) with Fraunces (display) and IBM Plex Sans/Mono loaded from Google Fonts in `index.html` — Plex Mono is reserved specifically for phonetic transcriptions and frequency counts, not general UI. `.frame` is the one shared boundary convention (hairline border, no fill/shadow) applied to every grouped read-only surface (login card, header language switcher, translate result, saved list); the composer is the deliberate exception, staying filled since it's the one thing you type into. The vocabulary breakdown under a translation and the saved-words list both render as the same one-row-per-word "lexicon" list (`.vocab-item`/`.vocab-item-main`) rather than separate stylings, so a word looks the same whether it's freshly translated or being looked up again.
+
 ## Key Design Decisions
 
 1. **No provider is structurally privileged**: adding a provider means one new `ProviderConfig` factory in `backend/src/lib/providers.ts` (label, baseUrl, model, optional `disableThinking`/`reasoningEffort`) and adding it to the ordered list `providersFromEnv` builds in `backend/src/routes/translate.ts`, which `autoSwitchTranslate`/`autoSwitchTranslateStream` try in order — currently that list is Gemini-only (two models, see Provider chain above); Qwen's factory still exists but isn't in the list.
