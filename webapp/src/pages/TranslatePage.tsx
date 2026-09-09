@@ -59,7 +59,8 @@ export function TranslatePage({ languagePairId, useSimplified, toEnglish, setToE
 
       {ttsSupported && ttsVoiceAvailable === false && (
         <p className="hint tts-warning">
-          ⚠️ No {pair.label} voice found on this device — playback will use a different accent.{" "}
+          ⚠️ No {pair.label} voice found on this device — playback will use a different accent.
+          <br />
           {VOICE_SETTINGS_INSTRUCTIONS[detectOS()]}
         </p>
       )}
