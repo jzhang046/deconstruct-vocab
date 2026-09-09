@@ -2,8 +2,18 @@ import { useState } from "react";
 import { useTranslate } from "../hooks/useTranslate";
 import type { useVocabulary } from "../hooks/useVocabulary";
 import { speak, ttsSupported } from "../audio/speech";
+import { useTtsVoiceAvailable } from "../audio/useTtsVoice";
 import { speechRecognitionSupported, useSpeechRecognition } from "../audio/useSpeechRecognition";
 import { languagePairFromId } from "../lib/languagePair";
+import { detectOS } from "../lib/platform";
+
+const VOICE_SETTINGS_INSTRUCTIONS: Record<ReturnType<typeof detectOS>, string> = {
+  macos: "macOS: System Settings → Accessibility → Spoken Content → System Voice → Manage Voices…",
+  windows: "Windows: Settings → Time & Language → Speech → Manage voices → Add voices",
+  ios: "iOS: Settings → Accessibility → Spoken Content → Voices",
+  android: "Android: Settings → System → Languages & input → Text-to-speech output → Install voice data",
+  other: "Check your device's Text-to-Speech / Accessibility settings to add a voice.",
+};
 
 interface Props {
   languagePairId: string;
@@ -20,6 +30,7 @@ export function TranslatePage({ languagePairId, useSimplified, toEnglish, setToE
   const pair = languagePairFromId(languagePairId);
   const speechLocale = toEnglish ? pair.speechLocale : "en-US";
   const recognition = useSpeechRecognition(speechLocale);
+  const ttsVoiceAvailable = useTtsVoiceAvailable(pair.ttsLocale);
   // Correction only makes sense when the learner typed the foreign-language
   // sentence themselves (toEnglish) — there's nothing of theirs to correct
   // when they're reading a translation generated the other direction.
@@ -45,6 +56,13 @@ export function TranslatePage({ languagePairId, useSimplified, toEnglish, setToE
         </button>
         <span>{toEnglish ? "English" : pair.label}</span>
       </div>
+
+      {ttsSupported && ttsVoiceAvailable === false && (
+        <p className="hint tts-warning">
+          ⚠️ No {pair.label} voice found on this device — playback will use a different accent.{" "}
+          {VOICE_SETTINGS_INSTRUCTIONS[detectOS()]}
+        </p>
+      )}
 
       <div className="input-row">
         <textarea
@@ -87,7 +105,7 @@ export function TranslatePage({ languagePairId, useSimplified, toEnglish, setToE
           <div className="result-foreign">
             <span>{state.result.foreignText}</span>
             {ttsSupported && (
-              <button className="icon-button" onClick={() => speak(state.result.foreignText, pair.ttsLocale)} aria-label="Play">
+              <button className="icon-button" onClick={() => void speak(state.result.foreignText, pair.ttsLocale)} aria-label="Play">
                 🔊
               </button>
             )}
