@@ -65,43 +65,48 @@ export function TranslatePage({ languagePairId, useSimplified, toEnglish, setToE
         </p>
       )}
 
-      <div className="input-row">
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder={`Enter ${toEnglish ? pair.label : "English"} text…`}
-          rows={3}
-        />
-        {speechRecognitionSupported && (
-          <button
-            className={`icon-button mic-button ${recognition.phase === "listening" ? "active" : ""}`}
-            onMouseDown={() => recognition.start((transcript) => setText(transcript))}
-            onMouseUp={recognition.stop}
-            onMouseLeave={recognition.stop}
-            aria-label="Hold to record"
-          >
-            🎤
+      <div className="composer">
+        <div className="input-row">
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder={`Enter ${toEnglish ? pair.label : "English"} text…`}
+            rows={3}
+          />
+          {speechRecognitionSupported && (
+            <button
+              className={`icon-button mic-button ${recognition.phase === "listening" ? "active" : ""}`}
+              onMouseDown={() => recognition.start((transcript) => setText(transcript))}
+              onMouseUp={recognition.stop}
+              onMouseLeave={recognition.stop}
+              aria-label="Hold to record"
+            >
+              🎤
+            </button>
+          )}
+        </div>
+        {recognition.error && <p className="hint error">{recognition.error}</p>}
+
+        <div className="composer-footer">
+          {correctionAvailable ? (
+            <label className="checkbox-row hint">
+              <input type="checkbox" checked={checkGrammar} onChange={(e) => setCheckGrammar(e.target.checked)} />
+              Check my {pair.label} for mistakes
+            </label>
+          ) : (
+            <span />
+          )}
+          <button className="button primary" onClick={handleTranslate} disabled={state.status === "loading"}>
+            {state.status === "loading" ? "Translating…" : "Translate"}
           </button>
-        )}
+        </div>
       </div>
-      {recognition.error && <p className="hint error">{recognition.error}</p>}
-
-      {correctionAvailable && (
-        <label className="checkbox-row hint">
-          <input type="checkbox" checked={checkGrammar} onChange={(e) => setCheckGrammar(e.target.checked)} />
-          Check my {pair.label} for mistakes
-        </label>
-      )}
-
-      <button className="button primary" onClick={handleTranslate} disabled={state.status === "loading"}>
-        {state.status === "loading" ? "Translating…" : "Translate"}
-      </button>
 
       {state.status === "loading" && state.notice && <p className="hint">{state.notice}</p>}
       {state.status === "error" && <p className="hint error">{state.message}</p>}
 
       {state.status === "success" && (
-        <div className="result-card card">
+        <div className="result-card frame">
           {state.notice && <p className="hint">{state.notice}</p>}
           <div className="result-foreign">
             <span>{state.result.foreignText}</span>
@@ -137,7 +142,7 @@ export function TranslatePage({ languagePairId, useSimplified, toEnglish, setToE
                 const saved = vocab.isSaved(v.word, languagePairId);
                 return (
                   <li key={v.word}>
-                    <div>
+                    <div className="vocab-item-main">
                       <span className="vocab-word">{v.word}</span>
                       {v.altScript && <span className="vocab-alt">({v.altScript})</span>}
                       {v.phonetic && <span className="vocab-phonetic">{v.phonetic}</span>}

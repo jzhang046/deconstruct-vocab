@@ -64,20 +64,27 @@ export default function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>Deconstruct</h1>
+        <div className="brand">
+          <h1>Deconstruct</h1>
+          <span className="brand-tagline">translate &amp; remember</span>
+        </div>
         <div className="header-controls">
-          <select value={languagePairId} onChange={(e) => setLanguagePairId(e.target.value)}>
-            {LANGUAGE_PAIRS.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label}
-              </option>
-            ))}
-          </select>
-          {pair.hasScriptVariants && (
-            <button className="button" onClick={() => setUseSimplified((v) => !v)}>
-              {useSimplified ? "简体" : "繁體"}
-            </button>
-          )}
+          <div className="lang-switcher">
+            <span className="lang-select-wrap">
+              <select value={languagePairId} onChange={(e) => setLanguagePairId(e.target.value)}>
+                {LANGUAGE_PAIRS.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+            </span>
+            {pair.hasScriptVariants && (
+              <button className="script-toggle" onClick={() => setUseSimplified((v) => !v)}>
+                {useSimplified ? "简体" : "繁體"}
+              </button>
+            )}
+          </div>
           <span className="user-name">{user.name}</span>
           <button className="button" onClick={() => void logout().then(() => setUser(null))}>
             Sign out
