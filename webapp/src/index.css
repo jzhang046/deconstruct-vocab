@@ -255,6 +255,11 @@ a.button.primary {
   color: #d1242f;
 }
 
+.preview-tag {
+  font-style: italic;
+  margin-left: 0.5rem;
+}
+
 .result-card {
   display: flex;
   flex-direction: column;

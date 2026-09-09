@@ -1,12 +1,21 @@
 import { useCallback, useRef, useState } from "react";
-import { ApiError, streamTranslate, translate as translateFull, type TranslateParams } from "../api/client";
+import { ApiError, streamTranslate, type TranslateParams } from "../api/client";
 import { languagePairFromId } from "../lib/languagePair";
+import { browserTranslatePreview } from "../lib/browserTranslate";
+import { extractPartialFields } from "../lib/streamingJson";
 import type { TranslationResult } from "../lib/types";
 
 export type TranslationState =
   | { status: "idle" }
   | { status: "loading"; notice?: string }
-  | { status: "success"; result: TranslationResult; vocabLoading: boolean; vocabError: boolean; notice?: string }
+  | {
+      status: "success";
+      result: TranslationResult;
+      vocabLoading: boolean;
+      vocabError: boolean;
+      preview?: boolean;
+      notice?: string;
+    }
   | { status: "error"; message: string };
 
 function foreignLanguageCode(languagePairId: string, useSimplified: boolean) {
@@ -15,21 +24,22 @@ function foreignLanguageCode(languagePairId: string, useSimplified: boolean) {
   return pair.language;
 }
 
-// Stage 1 (translateStream) has no vocabulary/foreignText — this fills in a
-// display-ready shape while the full breakdown is still loading, mirroring
-// `PartialTranslation` -> `TranslationResult` in the Kotlin ViewModel.
-function partialResult(params: TranslateParams, translation: string, pinyin: string): TranslationResult {
+// Builds a display-ready TranslationResult from whatever has been extracted
+// so far (browser preview, or a still-streaming backend delta) — mirrors the
+// shape `shapeResult` in the backend produces once the real result lands.
+function draftResult(params: TranslateParams, translatedText: string, extra: Partial<TranslationResult> = {}): TranslationResult {
   const foreignLang = foreignLanguageCode(params.languagePairId, params.useSimplified);
   return {
     originalText: params.text,
-    translatedText: translation,
-    foreignText: params.toEnglish ? params.text : translation,
-    phoneticText: pinyin,
+    translatedText,
+    foreignText: params.toEnglish ? params.text : translatedText,
+    phoneticText: "",
     vocabulary: [],
     grammarNote: "",
     correction: "",
     sourceLanguage: params.toEnglish ? foreignLang : "en",
     targetLanguage: params.toEnglish ? "en" : foreignLang,
+    ...extra,
   };
 }
 
@@ -38,59 +48,79 @@ export function useTranslate() {
   const lastParamsRef = useRef<TranslateParams | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  const loadVocabulary = useCallback(async (params: TranslateParams, fallback: TranslationResult) => {
+  const translate = useCallback(async (params: TranslateParams) => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    lastParamsRef.current = params;
+    setState({ status: "loading" });
+
+    let buffer = "";
+    let sawDelta = false;
+
+    // Free, instant, on-device preview (Chrome only, feature-detected) —
+    // purely cosmetic while the accurate backend stream is still in flight.
+    // Dropped the moment a real delta arrives.
+    void browserTranslatePreview(params).then((preview) => {
+      if (!preview || sawDelta || controller.signal.aborted) return;
+      setState({ status: "success", result: draftResult(params, preview), vocabLoading: true, vocabError: false, preview: true });
+    });
+
     try {
-      const full = await translateFull(params);
-      setState({ status: "success", result: full, vocabLoading: false, vocabError: false, notice: full.notice });
-    } catch {
-      setState({ status: "success", result: fallback, vocabLoading: false, vocabError: true });
+      for await (const event of streamTranslate(params, controller.signal)) {
+        if ("error" in event) {
+          setState({ status: "error", message: event.error });
+          return;
+        }
+        if ("notice" in event) {
+          setState({ status: "loading", notice: event.notice });
+          continue;
+        }
+        if ("delta" in event) {
+          sawDelta = true;
+          buffer += event.delta;
+          const fields = extractPartialFields(buffer);
+          setState({
+            status: "success",
+            result: draftResult(params, fields.translatedText, {
+              phoneticText: fields.phoneticText,
+              grammarNote: fields.grammarNote,
+              correction: fields.correction,
+              vocabulary: fields.vocabulary.map((v) => ({
+                word: v.word,
+                phonetic: v.phonetic ?? "",
+                meaning: v.meaning,
+                frequency: 0,
+                altScript: v.altScript ?? null,
+                languagePairId: params.languagePairId,
+              })),
+            }),
+            vocabLoading: true,
+            vocabError: false,
+          });
+          continue;
+        }
+        // event.result: the authoritative shaped translation, streamed last.
+        sawDelta = true;
+        setState({ status: "success", result: event.result, vocabLoading: false, vocabError: false, notice: event.result.notice });
+      }
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      const message = err instanceof ApiError ? err.message : "Translation failed";
+      setState((prev) =>
+        sawDelta && prev.status === "success" ? { ...prev, vocabLoading: false, vocabError: true } : { status: "error", message },
+      );
+      return;
+    }
+
+    if (!sawDelta) {
+      setState({ status: "error", message: "No response from translation service" });
     }
   }, []);
 
-  const translate = useCallback(
-    async (params: TranslateParams) => {
-      abortRef.current?.abort();
-      const controller = new AbortController();
-      abortRef.current = controller;
-      lastParamsRef.current = params;
-      setState({ status: "loading" });
+  const retry = useCallback(() => {
+    if (lastParamsRef.current) void translate(lastParamsRef.current);
+  }, [translate]);
 
-      let lastPartial: TranslationResult | null = null;
-      try {
-        for await (const event of streamTranslate(params, controller.signal)) {
-          if (event.type === "error") {
-            setState({ status: "error", message: event.message });
-            return;
-          }
-          // A notice-only event (retrying with the fallback model) carries no
-          // text yet — surface it without clobbering any result we have.
-          if (event.data.notice && !event.data.translation && !event.data.pinyin) {
-            setState({ status: "loading", notice: event.data.notice });
-            continue;
-          }
-          lastPartial = partialResult(params, event.data.translation, event.data.pinyin);
-          setState({ status: "success", result: lastPartial, vocabLoading: true, vocabError: false });
-        }
-      } catch (err) {
-        if (err instanceof DOMException && err.name === "AbortError") return;
-        setState({ status: "error", message: err instanceof ApiError ? err.message : "Translation failed" });
-        return;
-      }
-
-      if (!lastPartial) {
-        setState({ status: "error", message: "No response from translation service" });
-        return;
-      }
-      await loadVocabulary(params, lastPartial);
-    },
-    [loadVocabulary],
-  );
-
-  const retryVocabulary = useCallback(() => {
-    if (state.status !== "success" || !lastParamsRef.current) return;
-    setState({ status: "success", result: state.result, vocabLoading: true, vocabError: false });
-    void loadVocabulary(lastParamsRef.current, state.result);
-  }, [state, loadVocabulary]);
-
-  return { state, translate, retryVocabulary };
+  return { state, translate, retry };
 }

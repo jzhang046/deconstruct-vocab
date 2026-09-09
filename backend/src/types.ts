@@ -40,11 +40,12 @@ export interface TranslationResult {
   notice?: string;
 }
 
-export interface PartialTranslation {
-  translation: string;
-  pinyin: string;
-  notice?: string;
-}
+// Events written to the /api/translate/stream SSE response, in order: zero or
+// more `delta` (a raw chunk of the model's in-progress JSON, for optimistic
+// client-side rendering), an optional `notice` if a retry with the fallback
+// model happened, then exactly one `result` (the authoritative shaped
+// TranslationResult, once the full response has been parsed server-side).
+export type TranslateStreamEvent = { delta: string } | { result: TranslationResult } | { notice: string };
 
 export interface TranslateRequestBody {
   text: string;

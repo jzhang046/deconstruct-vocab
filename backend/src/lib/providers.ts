@@ -16,17 +16,9 @@
 // GEMINI_PRIMARY_MODEL/GEMINI_FALLBACK_MODEL and autoSwitchTranslate below.
 
 import type { LanguagePair } from "./languagePair";
-import type { LanguageCode, TranslationResult, PartialTranslation } from "../types";
+import type { LanguageCode, TranslationResult, TranslateStreamEvent } from "../types";
 import { toSimplified, toTraditional } from "./scriptConverter";
-import {
-  STREAM_DELIMITER,
-  STREAM_SYSTEM,
-  buildPromptToEnglish,
-  buildPromptToForeign,
-  buildStreamPrompt,
-  systemToEnglish,
-  systemToForeign,
-} from "./promptBuilder";
+import { buildPromptToEnglish, buildPromptToForeign, systemToEnglish, systemToForeign } from "./promptBuilder";
 
 export interface ProviderConfig {
   label: string;
@@ -58,13 +50,12 @@ export const RETRY_NOTICE = "The translation service is busy — retrying, this 
 // true time-to-first-byte check — flash-lite models normally start streaming
 // in 1-3s.
 const STREAM_TIMEOUT_MS = 12_000;
-// Non-streaming (jsonMode): most chat-completion APIs don't emit response
-// headers until the full completion is generated, so fetch() resolving here
-// is close to an end-to-end generation timeout, not just connect time. That
-// call also asks for more (translation + phonetic guide + grammar note + a
-// structured vocab breakdown), so it gets more headroom — especially since
-// it's stage 2 of the UI and already renders behind a "Loading breakdown…"
-// indicator, so the extra slack costs little.
+// Non-streaming (jsonMode without stream): most chat-completion APIs don't
+// emit response headers until the full completion is generated, so fetch()
+// resolving here is close to an end-to-end generation timeout, not just
+// connect time. Only used by the standalone (non-streaming) POST
+// /api/translate path — the interactive UI uses the streaming+jsonMode
+// combination below, timed via STREAM_TIMEOUT_MS instead.
 const JSON_TIMEOUT_MS = 20_000;
 
 // Thrown by postChat for failures worth retrying with the fallback model
@@ -175,36 +166,16 @@ interface TranslationDto {
   vocabulary: VocabDto[];
 }
 
-export async function translateWithProvider(
-  config: ProviderConfig,
+// Shapes the model's raw DTO into the API's TranslationResult — shared by the
+// non-streaming and streaming paths so foreignText/script-normalization logic
+// lives in exactly one place.
+function shapeResult(
+  parsed: TranslationDto,
   text: string,
   languagePair: LanguagePair,
   toEnglish: boolean,
   useSimplified: boolean,
-  includeGrammarNote: boolean,
-  checkGrammar = false,
-): Promise<TranslationResult> {
-  const systemPrompt = toEnglish ? systemToEnglish(languagePair) : systemToForeign(languagePair, useSimplified);
-  const userPrompt = toEnglish
-    ? buildPromptToEnglish(text, languagePair, includeGrammarNote, checkGrammar)
-    : buildPromptToForeign(text, languagePair, useSimplified, includeGrammarNote);
-
-  const response = await postChat(
-    config,
-    [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt },
-    ],
-    { jsonMode: true },
-  );
-
-  const body = (await response.json()) as {
-    choices?: { message?: { content?: string } }[];
-  };
-  const rawText = body.choices?.[0]?.message?.content;
-  if (!rawText) throw new Error(`Empty response from ${config.label}`);
-
-  const parsed = JSON.parse(stripJsonFences(rawText)) as TranslationDto;
+): TranslationResult {
   const foreignLang = foreignLanguage(languagePair, useSimplified);
 
   const foreignText = toEnglish
@@ -235,21 +206,69 @@ export async function translateWithProvider(
   };
 }
 
-export async function* translateStreamWithProvider(
+export async function translateWithProvider(
   config: ProviderConfig,
   text: string,
   languagePair: LanguagePair,
   toEnglish: boolean,
   useSimplified: boolean,
-): AsyncGenerator<PartialTranslation> {
-  const userPrompt = buildStreamPrompt(text, languagePair, toEnglish, useSimplified);
+  includeGrammarNote: boolean,
+  checkGrammar = false,
+): Promise<TranslationResult> {
+  const systemPrompt = toEnglish ? systemToEnglish(languagePair) : systemToForeign(languagePair, useSimplified);
+  const userPrompt = toEnglish
+    ? buildPromptToEnglish(text, languagePair, includeGrammarNote, checkGrammar)
+    : buildPromptToForeign(text, languagePair, useSimplified, includeGrammarNote);
+
   const response = await postChat(
     config,
     [
-      { role: "system", content: STREAM_SYSTEM },
+      { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt },
     ],
-    { stream: true },
+    { jsonMode: true },
+  );
+
+  const body = (await response.json()) as {
+    choices?: { message?: { content?: string } }[];
+  };
+  const rawText = body.choices?.[0]?.message?.content;
+  if (!rawText) throw new Error(`Empty response from ${config.label}`);
+
+  const parsed = JSON.parse(stripJsonFences(rawText)) as TranslationDto;
+  return shapeResult(parsed, text, languagePair, toEnglish, useSimplified);
+}
+
+// Single call, streamed: the model still produces the full accurate
+// translation+vocabulary JSON (same prompt as translateWithProvider — no
+// quality tradeoff), but the raw text is relayed to the caller chunk by chunk
+// as `{ delta }` events for optimistic client-side rendering, then a final
+// `{ result }` event carries the authoritative shaped TranslationResult once
+// the complete response has been parsed. Replaces what used to be two
+// separate requests (a cheap delimiter-formatted preview call, then this full
+// call) — halves the input-token cost per translation and removes the risk of
+// the preview and the final translation disagreeing.
+export async function* translateStreamJsonWithProvider(
+  config: ProviderConfig,
+  text: string,
+  languagePair: LanguagePair,
+  toEnglish: boolean,
+  useSimplified: boolean,
+  includeGrammarNote: boolean,
+  checkGrammar = false,
+): AsyncGenerator<{ delta: string } | { result: TranslationResult }> {
+  const systemPrompt = toEnglish ? systemToEnglish(languagePair) : systemToForeign(languagePair, useSimplified);
+  const userPrompt = toEnglish
+    ? buildPromptToEnglish(text, languagePair, includeGrammarNote, checkGrammar)
+    : buildPromptToForeign(text, languagePair, useSimplified, includeGrammarNote);
+
+  const response = await postChat(
+    config,
+    [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+    { stream: true, jsonMode: true },
   );
 
   const reader = response.body?.getReader();
@@ -282,16 +301,16 @@ export async function* translateStreamWithProvider(
         if (!delta) continue;
 
         acc += delta;
-        const splitIndex = acc.indexOf(STREAM_DELIMITER);
-        const translation =
-          splitIndex >= 0 ? acc.slice(0, splitIndex) : acc.replace(/[|\n ]+$/, "");
-        const pinyin = splitIndex >= 0 ? acc.slice(splitIndex + STREAM_DELIMITER.length).trim() : "";
-        yield { translation, pinyin };
+        yield { delta };
       }
     }
   } finally {
     reader.releaseLock();
   }
+
+  if (!acc) throw new Error(`Empty response from ${config.label}`);
+  const parsed = JSON.parse(stripJsonFences(acc)) as TranslationDto;
+  yield { result: shapeResult(parsed, text, languagePair, toEnglish, useSimplified) };
 }
 
 // --- Auto-switching across model configs (primary -> fallback), skipping
@@ -341,7 +360,9 @@ export async function* autoSwitchTranslateStream(
   languagePair: LanguagePair,
   toEnglish: boolean,
   useSimplified: boolean,
-): AsyncGenerator<PartialTranslation> {
+  includeGrammarNote: boolean,
+  checkGrammar = false,
+): AsyncGenerator<TranslateStreamEvent> {
   const configured = providers.filter((p) => p.apiKey.trim().length > 0);
   if (configured.length === 0) throw new Error(NO_PROVIDER_ERROR);
 
@@ -349,9 +370,17 @@ export async function* autoSwitchTranslateStream(
     const config = configured[i];
     let yieldedAny = false;
     try {
-      for await (const partial of translateStreamWithProvider(config, text, languagePair, toEnglish, useSimplified)) {
+      for await (const event of translateStreamJsonWithProvider(
+        config,
+        text,
+        languagePair,
+        toEnglish,
+        useSimplified,
+        includeGrammarNote,
+        checkGrammar,
+      )) {
         yieldedAny = true;
-        yield partial;
+        yield event;
       }
       return;
     } catch (err) {
@@ -361,7 +390,7 @@ export async function* autoSwitchTranslateStream(
       const canRetry = isRetryable(err) && !yieldedAny && i < configured.length - 1;
       console.warn(`[AutoSwitch] ${config.label} stream failed${canRetry ? ", retrying with fallback" : ""}:`, err);
       if (!canRetry) throw err instanceof Error ? err : new Error("Translation failed");
-      yield { translation: "", pinyin: "", notice: RETRY_NOTICE };
+      yield { notice: RETRY_NOTICE };
     }
   }
 }

@@ -37,11 +37,9 @@ export interface TranslationResult {
   notice?: string;
 }
 
-export interface PartialTranslation {
-  translation: string;
-  pinyin: string;
-  notice?: string;
-}
+// Events read from the /api/translate/stream SSE response — see the
+// identical type in backend/src/types.ts.
+export type TranslateStreamEvent = { delta: string } | { result: TranslationResult } | { notice: string };
 
 export interface User {
   id: string;

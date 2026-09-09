@@ -74,17 +74,21 @@ translate.get("/stream", async (c) => {
   const languagePair = languagePairFromId(c.req.query("languagePairId") ?? "zh");
   const toEnglish = c.req.query("toEnglish") === "true";
   const useSimplified = c.req.query("useSimplified") !== "false";
+  const includeGrammarNote = c.req.query("includeGrammarNote") !== "false";
+  const checkGrammar = c.req.query("checkGrammar") === "true";
 
   return streamSSE(c, async (stream) => {
     try {
-      for await (const partial of autoSwitchTranslateStream(
+      for await (const event of autoSwitchTranslateStream(
         providersFromEnv(c.env),
         text,
         languagePair,
         toEnglish,
         useSimplified,
+        includeGrammarNote,
+        checkGrammar,
       )) {
-        await stream.writeSSE({ data: JSON.stringify(partial) });
+        await stream.writeSSE({ data: JSON.stringify(event) });
       }
     } catch (err) {
       await stream.writeSSE({

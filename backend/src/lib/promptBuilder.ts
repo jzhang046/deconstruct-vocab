@@ -8,13 +8,6 @@ import type { LanguagePair } from "./languagePair";
 const SIMPLIFIED = "Simplified Chinese (简体中文)";
 const TRADITIONAL = "Traditional Chinese (繁體中文)";
 
-// Stage 1 stream output format: "<translation>|||<pinyin>"
-export const STREAM_DELIMITER = "|||";
-
-export const STREAM_SYSTEM =
-  "You are a translator. Follow the output format exactly. " +
-  "No labels, no quotes, no explanations, no extra words.";
-
 function foreignDisplayName(languagePair: LanguagePair, useSimplified: boolean): string {
   if (languagePair.hasScriptVariants) return useSimplified ? SIMPLIFIED : TRADITIONAL;
   return languagePair.foreignName;
@@ -148,39 +141,4 @@ Rules:
 ${grammarRule}${correctionRule}- vocabulary must segment the input into natural words or short phrases a learner would look up individually. Do not split compound words, and do not skip any.
 - ${vocabWordRule(languagePair)}
 - Return ONLY the JSON, nothing else.`;
-}
-
-export function buildStreamPrompt(
-  text: string,
-  languagePair: LanguagePair,
-  toEnglish: boolean,
-  useSimplified: boolean,
-): string {
-  if (toEnglish) {
-    if (languagePair.hasPhoneticGuide) {
-      return (
-        `Translate the following ${languagePair.foreignName} to English.\n` +
-        `Output exactly: <English translation>${STREAM_DELIMITER}<${languagePair.phoneticGuideName} of the ${languagePair.foreignName} input>\n\n` +
-        `${languagePair.foreignName}:\n${text}`
-      );
-    }
-    return (
-      `Translate the following ${languagePair.foreignName} to English.\n` +
-      `Output exactly: <English translation>. No labels, no extra text.\n\n` +
-      `${languagePair.foreignName}:\n${text}`
-    );
-  }
-  const displayName = foreignDisplayName(languagePair, useSimplified);
-  if (languagePair.hasPhoneticGuide) {
-    return (
-      `Translate the following English to ${displayName}.\n` +
-      `Output exactly: <${displayName} translation>${STREAM_DELIMITER}<${languagePair.phoneticGuideName} of that translation>\n\n` +
-      `English:\n${text}`
-    );
-  }
-  return (
-    `Translate the following English to ${displayName}.\n` +
-    `Output exactly: <${displayName} translation>. No labels, no extra text.\n\n` +
-    `English:\n${text}`
-  );
 }

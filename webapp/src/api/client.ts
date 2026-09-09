@@ -1,4 +1,4 @@
-import type { PartialTranslation, TranslationResult, User, VocabularyItem } from "../lib/types";
+import type { TranslateStreamEvent, TranslationResult, User, VocabularyItem } from "../lib/types";
 
 export class ApiError extends Error {
   status: number;
@@ -56,14 +56,16 @@ export function translate(params: TranslateParams): Promise<TranslationResult> {
 // stream (which it always does once translation finishes), which would
 // silently re-trigger the translate call.
 export async function* streamTranslate(
-  params: Omit<TranslateParams, "includeGrammarNote">,
+  params: TranslateParams,
   signal?: AbortSignal,
-): AsyncGenerator<{ type: "partial"; data: PartialTranslation } | { type: "error"; message: string }> {
+): AsyncGenerator<TranslateStreamEvent | { error: string }> {
   const url = new URL("/api/translate/stream", location.origin);
   url.searchParams.set("text", params.text);
   url.searchParams.set("languagePairId", params.languagePairId);
   url.searchParams.set("toEnglish", String(params.toEnglish));
   url.searchParams.set("useSimplified", String(params.useSimplified));
+  url.searchParams.set("includeGrammarNote", String(params.includeGrammarNote ?? true));
+  if (params.checkGrammar) url.searchParams.set("checkGrammar", "true");
 
   const res = await fetch(url, { credentials: "include", signal });
   if (!res.ok || !res.body) {
@@ -92,9 +94,9 @@ export async function* streamTranslate(
           if (!payload) continue;
           const parsed = JSON.parse(payload);
           if (pendingEvent === "error") {
-            yield { type: "error", message: parsed.error ?? "Translation failed" };
+            yield { error: parsed.error ?? "Translation failed" };
           } else {
-            yield { type: "partial", data: parsed as PartialTranslation };
+            yield parsed as TranslateStreamEvent;
           }
           pendingEvent = "message";
         } else if (line === "") {

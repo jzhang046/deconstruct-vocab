@@ -16,7 +16,7 @@ interface Props {
 export function TranslatePage({ languagePairId, useSimplified, toEnglish, setToEnglish, vocab }: Props) {
   const [text, setText] = useState("");
   const [checkGrammar, setCheckGrammar] = useState(false);
-  const { state, translate, retryVocabulary } = useTranslate();
+  const { state, translate, retry } = useTranslate();
   const pair = languagePairFromId(languagePairId);
   const speechLocale = toEnglish ? pair.speechLocale : "en-US";
   const recognition = useSpeechRecognition(speechLocale);
@@ -91,6 +91,7 @@ export function TranslatePage({ languagePairId, useSimplified, toEnglish, setToE
                 🔊
               </button>
             )}
+            {state.preview && <span className="hint preview-tag">⚡ instant preview</span>}
           </div>
           {state.result.phoneticText && <p className="phonetic">{state.result.phoneticText}</p>}
           {!toEnglish ? null : <p className="translated-text">{state.result.translatedText}</p>}
@@ -101,11 +102,11 @@ export function TranslatePage({ languagePairId, useSimplified, toEnglish, setToE
             </p>
           )}
 
-          {state.vocabLoading && <p className="hint">Loading breakdown…</p>}
+          {state.vocabLoading && <p className="hint">{state.preview ? "Translating…" : "Loading breakdown…"}</p>}
           {state.vocabError && (
             <div className="hint error">
-              Couldn't load breakdown.{" "}
-              <button className="link-button" onClick={retryVocabulary}>
+              Couldn't finish the translation.{" "}
+              <button className="link-button" onClick={retry}>
                 Retry
               </button>
             </div>
