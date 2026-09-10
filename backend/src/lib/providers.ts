@@ -46,6 +46,17 @@ export const GEMINI_FALLBACK_MODEL = "gemini-3.1-flash-lite";
 // never names a model.
 export const RETRY_NOTICE = "The translation service is busy — retrying, this may take a few extra seconds.";
 
+// Gemini rejects requests whose apparent origin (the calling Cloudflare PoP,
+// not anything we control) is outside its supported regions, with a 400 body
+// containing this phrase. Not retryable — every configured provider shares
+// the same Worker network location, so the fallback model would fail
+// identically. There's nothing the user can do about it either, so we swap
+// in a plain "come back later" message instead of surfacing the raw
+// Google/Cloudflare error text.
+const LOCATION_UNSUPPORTED_MARKER = "User location is not supported";
+export const LOCATION_UNSUPPORTED_MESSAGE =
+  "AI translation isn't available right now. Please try again in a little while.";
+
 // Streaming: fetch() resolves once the first SSE bytes arrive, so this is a
 // true time-to-first-byte check — flash-lite models normally start streaming
 // in 1-3s.
@@ -133,6 +144,9 @@ async function postChat(
   }
   if (!response.ok) {
     const errorBody = await response.text();
+    if (errorBody.includes(LOCATION_UNSUPPORTED_MARKER)) {
+      throw new Error(LOCATION_UNSUPPORTED_MESSAGE);
+    }
     const message = `${config.label} (${config.model}) API error: ${response.status} - ${errorBody}`;
     if (response.status === 429 || response.status === 503) {
       throw new RetryableProviderError(message);

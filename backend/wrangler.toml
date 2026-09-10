@@ -10,6 +10,17 @@ routes = [
 # keep it alive too as a fallback/testing endpoint alongside the custom domain.
 workers_dev = true
 
+# Smart Placement: run the Worker near the backends it calls (D1, Gemini)
+# instead of always near the requesting client. Tried as a mitigation for
+# Gemini's "User location is not supported for the API use" error — default
+# placement runs the Worker in the Cloudflare PoP closest to the user, so the
+# outbound call to Gemini inherits that same (possibly unsupported) apparent
+# origin; Smart Placement should make that origin more consistent. It's a
+# latency heuristic, not a geo-compliance guarantee — Cloudflare decides the
+# actual location and it may shift over time.
+[placement]
+mode = "smart"
+
 # Serves the built React SPA (webapp/dist) for any request that doesn't match
 # a Worker route below, so the frontend and API ship as one deployable unit.
 [assets]
